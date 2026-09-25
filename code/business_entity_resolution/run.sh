@@ -18,7 +18,7 @@ mkdir -p "$LOG"
 stage=${1:-}; shift || true
 export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false
 
-run() { local name=$1; shift; echo ">>> $*"; python -m "$@" 2>&1 | grep -v DeprecationWarning | tee "$LOG/$name.log"; }
+run() { local name=$1; shift; echo ">>> $*"; python -m "$@" 2>&1 | grep --line-buffered -v DeprecationWarning | tee "$LOG/$name.log"; }
 
 chain1() {  # $1=data $2=work $3=log prefix, rest = extra bienc args
   local d=$1 w=$2 p=$3; shift 3
