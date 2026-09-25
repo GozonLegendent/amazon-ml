@@ -88,37 +88,67 @@ PARAMS = dict(objective="binary", learning_rate=0.1, force_col_wise=True, num_le
               max_bin=255, verbose=-1)
 
 
-def fit(P, stage, args):
-    cands, X = load_matrix(P, "train", stage)
-    y, fold = labels_and_folds(P, cands)
-    tr = np.isin(fold, RANK_FOLDS)
-    va = fold == 0
-    if args.max_train_rows and tr.sum() > args.max_train_rows:
-        rng = np.random.default_rng(0)
-        keep = np.zeros_like(tr)
-        idx = np.flatnonzero(tr)
-        keep[rng.choice(idx, args.max_train_rows, replace=False)] = True
-        tr = keep
-    names = X.columns
-    Xn = X.to_numpy().astype(np.float32)
-    log.info(f"[{stage}] train rows {tr.sum()} (pos {y[tr].mean():.4f}) | val rows {va.sum()} | {len(names)} features")
+def _subsample(mask, n, seed=0):
+    if not n or mask.sum() <= n:
+        return mask
+    keep = np.zeros_like(mask)
+    keep[np.random.default_rng(seed).choice(np.flatnonzero(mask), n, replace=False)] = True
+    return keep
+
+
+def _train(Xn, y, tr, va, names, args, tag):
     params = dict(PARAMS, num_threads=args.threads, seed=0)
     dtr = lgb.Dataset(Xn[tr], y[tr], feature_name=names, free_raw_data=True)
     dva = lgb.Dataset(Xn[va], y[va], reference=dtr)
-    with timer(f"[{stage}] lightgbm fit"):
-        bst = lgb.train(params, dtr, num_boost_round=args.rounds, valid_sets=[dva], valid_names=["val"],
-                        callbacks=[lgb.early_stopping(50), lgb.log_evaluation(50)])
+    with timer(f"{tag} lightgbm fit ({int(tr.sum())} rows, pos {y[tr].mean():.4f})"):
+        return lgb.train(params, dtr, num_boost_round=args.rounds, valid_sets=[dva], valid_names=["val"],
+                         callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)])
+
+
+def fit(P, stage, args):
+    """Train on folds 1-4 with early stopping on fold 0.
+
+    For the pruner, training-split predictions on folds 1-4 are made out-of-fold
+    (4 extra models, each predicting the fold it did not see), because the final
+    ranker is trained on those rows with the pruner score as a feature and must see
+    the same kind of score it will get on validation and test.
+    Returns (booster, cands, train_predictions_or_None).
+    """
+    cands, X = load_matrix(P, "train", stage)
+    y, fold = labels_and_folds(P, cands)
+    names = X.columns
+    Xn = X.to_numpy()
+    if Xn.dtype != np.float32:
+        Xn = Xn.astype(np.float32)
+    del X
+    va = fold == 0
+    tr_all = np.isin(fold, RANK_FOLDS)
+    tr = _subsample(tr_all, args.max_train_rows)
+    log.info(f"[{stage}] train rows {int(tr.sum())} of {int(tr_all.sum())} | val rows {int(va.sum())} | {len(names)} features")
+    bst = _train(Xn, y, tr, va, names, args, f"[{stage}]")
     bst.save_model(P.w("models", f"lgb_{stage}.txt"))
     imp = sorted(zip(names, bst.feature_importance("gain")), key=lambda t: -t[1])
-    log.info(f"[{stage}] top features: " + ", ".join(f"{n}:{g:.0f}" for n, g in imp[:20]))
+    log.info(f"[{stage}] top features: " + ", ".join(f"{n}:{g:.0f}" for n, g in imp[:25]))
     save_json({n: float(g) for n, g in imp}, P.w("models", f"lgb_{stage}_importance.json"))
-    return bst
+    p_train = None
+    if stage == "prune":
+        with timer("[prune] predict train"):
+            p_train = bst.predict(Xn, num_threads=args.threads)
+        for f in RANK_FOLDS:
+            bf = _train(Xn, y, tr & (fold != f), va, names, args, f"[prune/out-of-fold {f}]")
+            m = fold == f
+            p_train[m] = bf.predict(Xn[m], num_threads=args.threads)
+        log.info("[prune] folds 1-4 now carry out-of-fold pruner scores")
+    return bst, cands, p_train
 
 
-def predict(P, stage, bst, split, args):
-    cands, X = load_matrix(P, split, stage)
-    with timer(f"[{stage}] predict {split} ({X.height} rows)"):
-        p = bst.predict(X.to_numpy().astype(np.float32), num_threads=args.threads)
+def predict(P, stage, bst, split, args, cands=None, p=None):
+    if p is None:
+        cands, X = load_matrix(P, split, stage)
+        Xn = X.to_numpy()
+        del X
+        with timer(f"[{stage}] predict {split} ({len(Xn)} rows)"):
+            p = bst.predict(Xn if Xn.dtype == np.float32 else Xn.astype(np.float32), num_threads=args.threads)
     if stage == "prune":
         df = cands.with_columns(pl.Series("p_a", p, pl.Float32), pl.arange(0, cands.height, dtype=pl.Int64).alias("row"))
         df = (df.sort("q_idx", "p_a", descending=[False, True])
@@ -155,9 +185,12 @@ def main():
     ap.add_argument("--splits", default="train,test")
     args = ap.parse_args()
     P = Paths(args.data_dir, args.work_dir)
-    bst = fit(P, args.stage, args)
+    bst, cands_tr, p_tr = fit(P, args.stage, args)
     for split in args.splits.split(","):
-        predict(P, args.stage, bst, split, args)
+        if split == "train" and p_tr is not None:
+            predict(P, args.stage, bst, split, args, cands=cands_tr, p=p_tr)
+        else:
+            predict(P, args.stage, bst, split, args)
 
 
 if __name__ == "__main__":

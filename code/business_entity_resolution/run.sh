@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage runner. Usage:  bash run.sh <stage> [extra args passed to the stage]
 #   prepare | bienc | retrieve | features | prune | xenc | final | decide | validate
-#   all1  = prepare -> bienc -> retrieve
+#   all1  = prepare -> bienc -> retrieve -> refold
 #   all2  = features -> prune -> feats2 -> xenc -> final -> decide -> validate
 #   smoke = both chains on a 1% subset (catches bugs in a few minutes)
 # Paths default to <ROOT>/student_resource/dataset and <ROOT>/submission/...
@@ -25,6 +25,7 @@ chain1() {  # $1=data $2=work $3=log prefix, rest = extra bienc args
   run ${p}prepare  src.prepare   --data-dir "$d" --work-dir "$w"
   run ${p}bienc    src.biencoder --data-dir "$d" --work-dir "$w" "$@"
   run ${p}retrieve src.retrieve  --data-dir "$d" --work-dir "$w"
+  run ${p}refold   src.refold    --data-dir "$d" --work-dir "$w"
 }
 chain2() {  # $1=data $2=work $3=out $4=log prefix, rest = extra xenc args
   local d=$1 w=$2 o=$3 p=$4; shift 4
@@ -47,6 +48,7 @@ case "$stage" in
   prepare)  run prepare  src.prepare      --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   bienc)    run bienc    src.biencoder    --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   retrieve) run retrieve src.retrieve     --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
+  refold)   run refold   src.refold       --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   features) run features src.features     --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   prune)    run prune    src.ranker       --data-dir "$DATA" --work-dir "$WORK" --stage prune "$@" ;;
   feats2)   run feats2   src.features2    --data-dir "$DATA" --work-dir "$WORK" "$@" ;;

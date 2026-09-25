@@ -37,11 +37,12 @@ class CrossEncoder(torch.nn.Module):
         self.head = torch.nn.Linear(self.m.config.hidden_size, 1)
 
     def forward(self, ids, mask):
-        h = self.m(input_ids=ids, attention_mask=mask).last_hidden_state
-        m = mask.unsqueeze(-1).to(h.dtype)
+        h = self.m(input_ids=ids, attention_mask=mask).last_hidden_state.float()
+        m = mask.unsqueeze(-1).float()
         e = (h * m).sum(1) / m.sum(1).clamp(min=1)
-        # match the head's dtype (fp32 in training under autocast, bf16 when scoring)
-        return self.head(e.to(self.head.weight.dtype)).float().squeeze(-1)
+        # the head stays fp32 even when the encoder runs in bf16 (avoids 1/32 logit rounding)
+        with torch.autocast(e.device.type, enabled=False):
+            return self.head(e.to(self.head.weight.dtype)).float().squeeze(-1)
 
 
 class GroupDS(Dataset):
@@ -171,14 +172,15 @@ def score(P, args):
     path = os.path.dirname(P.w("models", "xenc", "config.json"))
     tok = AutoTokenizer.from_pretrained(path)
     model = CrossEncoder(path)
-    model.head.load_state_dict(torch.load(os.path.join(path, "head.pt"))["head"])
+    model.head.load_state_dict(torch.load(os.path.join(path, "head.pt"), map_location="cpu")["head"])
     model = model.to(dev).eval()
     if dev == "cuda":
-        model = model.to(torch.bfloat16)
+        model.m = model.m.to(torch.bfloat16)  # encoder in bf16, head stays fp32
     for split in args.splits.split(","):
         out_p = P.w("xenc", f"{split}.npy")
         c = pl.read_parquet(P.w("pruned", f"{split}.parquet"), columns=["q_idx", "s1_idx"])
-        if os.path.exists(out_p) and not args.overwrite and np.load(out_p, mmap_mode="r").shape[0] == c.height:
+        if (args.skip_train and not args.overwrite and os.path.exists(out_p)
+                and np.load(out_p, mmap_mode="r").shape[0] == c.height):
             log.info(f"skip existing {out_p}")
             continue
         ia, ib = c["s1_idx"].to_numpy(), c["q_idx"].to_numpy()

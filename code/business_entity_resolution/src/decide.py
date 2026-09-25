@@ -51,7 +51,10 @@ def tune(P, args):
     s1 = pl.read_parquet(P.w("train", "s1.parquet"), columns=["idx", "fold", "country"])
     val = s1.filter(pl.col("fold") == 0).select(pl.col("idx").alias("s1_idx"), "country")
     gt = pl.read_parquet(P.w("train", "gt.parquet")).join(val.select("s1_idx"), on="s1_idx")
-    best = best_per_query(scored).join(val.select("s1_idx"), on="s1_idx")
+    # only validation-fold queries: their scores are out-of-sample for every model
+    qv = pl.read_parquet(P.w("train", "q.parquet"), columns=["idx", "fold"]).filter(pl.col("fold") == 0)
+    best = (best_per_query(scored).join(val.select("s1_idx"), on="s1_idx")
+                                  .join(qv.select(pl.col("idx").alias("q_idx")), on="q_idx"))
     res = []
     for t in np.round(np.arange(0.05, 0.96, 0.01), 3):
         f, _ = f05_macro(best.filter(pl.col("p") >= t).select("s1_idx", "q_idx"), gt, val.select("s1_idx"))

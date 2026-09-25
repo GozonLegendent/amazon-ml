@@ -67,9 +67,9 @@ def make_batches(pairs, s1, bs, max_pairs, seed):
     grp = s1c.group_by("country", "ncore").agg(pl.col("idx"))
     gmap = {(c, n): ids for c, n, ids in grp.iter_rows()}
     all_by_c = {c: s1c.filter(pl.col("country") == c)["idx"].to_list()
-                for c in s1c["country"].unique().to_list()}
+                for c in sorted(s1c["country"].unique().to_list())}
     batches = []
-    for c in p["country"].unique().to_list():
+    for c in sorted(p["country"].unique().to_list()):
         sub = p.filter(pl.col("country") == c)
         rows = list(zip(sub["q_idx"].to_list(), sub["s1_idx"].to_list(), sub["ncore"].to_list()))
         rng.shuffle(rows)
@@ -187,7 +187,8 @@ def embed(P, args):
         for nm in ("s1", "q"):
             out_p = P.w("emb", f"{split}_{nm}.npy")
             txt = pl.read_parquet(P.w(split, f"{nm}.parquet"), columns=["mtext"])["mtext"].to_list()
-            if os.path.exists(out_p) and not args.overwrite and np.load(out_p, mmap_mode="r").shape[0] == len(txt):
+            if (args.skip_train and not args.overwrite and os.path.exists(out_p)
+                    and np.load(out_p, mmap_mode="r").shape[0] == len(txt)):
                 log.info(f"skip existing {out_p}")
                 continue
             order = np.argsort(np.fromiter((len(t) for t in txt), np.int32, len(txt)))

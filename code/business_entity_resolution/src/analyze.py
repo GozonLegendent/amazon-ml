@@ -34,7 +34,9 @@ def main():
     scored = pl.read_parquet(P.w("scored", "train.parquet"))
     best = (scored.sort("q_idx", "p", descending=[False, True]).group_by("q_idx", maintain_order=True)
                   .agg(pl.col("s1_idx").first().alias("best_s1"), pl.col("p").first().alias("best_p")))
-    pred = best.filter(pl.col("best_p") >= t).select("q_idx", pl.col("best_s1").alias("s1_idx")).join(vset, on="s1_idx")
+    qv = pl.read_parquet(P.w("train", "q.parquet"), columns=["idx", "fold"]).filter(pl.col("fold") == 0)
+    pred = (best.filter(pl.col("best_p") >= t).select("q_idx", pl.col("best_s1").alias("s1_idx")).join(vset, on="s1_idx")
+                .join(qv.select(pl.col("idx").alias("q_idx")), on="q_idx"))
 
     # misses: where were they lost?
     m = (gt.join(pred.with_columns(pl.lit(True).alias("hit")), on=["q_idx", "s1_idx"], how="left")

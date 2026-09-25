@@ -136,8 +136,9 @@ def cluster_feats(pr, s1, q):
            .join(q_first, on="q_idx", how="left").join(s_first, on="s1_idx", how="left"))
     d = d.with_columns(
         pl.when(pl.col("q_fn").is_null()).then(-1).otherwise(pl.len().over("s1_idx", "q_fn") - 1).alias("cl_same_qnum"),
-        ((pl.col("q_fn") == pl.col("s_fn")).cast(pl.Int32).sum().over("s1_idx")
-         - (pl.col("q_fn") == pl.col("s_fn")).cast(pl.Int32).fill_null(0)).alias("cl_same_snum"),
+        pl.when(pl.col("s_fn").is_null()).then(-1).otherwise(
+            (pl.col("q_fn") == pl.col("s_fn")).cast(pl.Int32).sum().over("s1_idx")
+            - (pl.col("q_fn") == pl.col("s_fn")).cast(pl.Int32).fill_null(0)).alias("cl_same_snum"),
         pl.len().over("s1_idx").alias("cl_n"),
     ).sort("r")
     return {k: d[k].fill_null(-1).cast(pl.Float32).to_numpy() for k in ("cl_same_qnum", "cl_same_snum", "cl_n")}
