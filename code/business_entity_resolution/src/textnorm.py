@@ -28,12 +28,12 @@ NAME_CANON = {
     "international": "intl", "technologies": "tech", "technology": "tech",
     "enterprises": "ent", "enterprise": "ent", "industries": "ind", "industry": "ind",
     "brothers": "bros", "center": "ctr", "centre": "ctr", "groupe": "group",
-    "etablissements": "ets", "saint": "st", "sainte": "ste",
+    "etablissements": "ets", "saint": "st", "sainte": "ste", "frs": "freres",
 }
 LEGAL = {
     "inc", "corp", "co", "ltd", "pvt", "llc", "llp", "lp", "plc", "pllc", "pc", "pa",
     "sarl", "sas", "sasu", "sa", "eurl", "sci", "snc", "scop", "selarl", "gie", "ets",
-    "group", "holdings", "holding", "partners", "&", "the", "of", "ms", "m",
+    "group", "holdings", "holding", "partners", "&", "the", "of", "ms", "m", "ei",
 }
 HONORIFIC = {"dr", "smt", "sri", "shri", "shree", "mr", "mrs", "ms", "the", "m s", "messrs"}
 NAME_STOP = {"the", "of", "de", "du", "la", "le", "les", "des", "d", "l", "&", "a", "an"}
@@ -56,9 +56,19 @@ ADDR_CANON = {
     "opp": "opp", "industrial": "ind", "area": "area", "village": "vill", "vil": "vill",
     "district": "dist", "dt": "dist", "post": "po", "marg": "marg", "cross": "crs",
     "main": "main", "block": "blk", "phase": "ph", "extension": "extn", "ext": "extn",
+    # more French street types / building words
+    "ch": "che", "chem": "che", "cours": "crs", "q": "qu", "passage": "psg", "pass": "psg",
+    "bld": "blvd", "bvd": "blvd", "bldv": "blvd", "chaussee": "chs", "chee": "chs", "promenade": "prom",
+    "lotissement": "lot", "hameau": "ham", "esplanade": "esp", "fg": "fbg", "resid": "res",
+    "app": "apt", "appt": "apt", "appartement": "apt", "etage": "flr", "etg": "flr",
+    "bat": "bldg", "batiment": "bldg",
 }
 ADDR_NOISE = {"no", "door", "hno", "house", "unit", "apt", "ste", "pmb", "po", "box",
-              "flat", "dno", "shop", "office", "plot", "bis", "ter", "b"}
+              "flat", "dno", "shop", "office", "plot", "bis", "ter", "quater", "b"}
+# French street types, used to repair typos ("Anenue", "Impase") in the slot right after the house number
+STREET_TYPES = ["rue", "avenue", "boulevard", "chemin", "allee", "impasse", "route", "place", "quai", "cours",
+                "cour", "passage", "square", "residence", "cite", "faubourg", "chaussee", "promenade",
+                "lotissement", "hameau", "sentier", "sente", "esplanade", "parvis", "villa", "plage", "cote"]
 
 _COMB = re.compile(r"[̀-ͯ]")
 _SPLIT = re.compile(r"[^0-9a-zऀ-෿]+")
@@ -66,6 +76,11 @@ _DIGITS = re.compile(r"\d+")
 _DOMAIN = re.compile(r"^(?:https?://)?(?:www\.)?([a-z0-9\-]+)\.(?:com|net|org|in|co|fr|biz|info|us|co\.in)$")
 _LONGNUM = re.compile(r"\b\d{5,}\b")
 _JUNK_PAREN = re.compile(r"\((?:id|ref|no)[^)]*\)|#\s*\d{4,}|\bid\s*[:#]\s*\d+", re.I)
+# "X dba Y" / "X formerly Y" -> the business is Y
+_ALIAS = re.compile(r"\s+(?:d\.?/?b\.?/?a\.?:?|doing business as|trading as|t/a|a/k/a|aka|f/k/a|fka|"
+                    r"formerly known as|formerly|nee|née)\s+", re.I)
+_NUMERO = re.compile(r"\bn\s*[°º]\s*|\bno\.?\s*(?=\d)|#\s*(?=\d)")        # "N°24", "No.24", "#24" -> "24"
+_NUM_SUFFIX = re.compile(r"\b(\d+)\s*(?:bis|ter|quater|[bt])\b(?!\.)")         # "5 bis", "1 T" -> "5", "1"
 
 
 def fold(s):
@@ -76,6 +91,31 @@ def fold(s):
     s = unicodedata.normalize("NFKD", s)
     s = _COMB.sub("", s)
     return unicodedata.normalize("NFC", s).lower()
+
+
+def _lig(s):
+    return (s or "").replace("œ", "oe").replace("Œ", "Oe").replace("æ", "ae").replace("Æ", "Ae").replace("\x92", "'")
+
+
+def name_main(name):
+    """Right-hand side of an alias marker ('X dba Y' -> 'Y'), else the name itself."""
+    p = _ALIAS.split(name or "", maxsplit=1)
+    return p[1] if len(p) == 2 and p[1].strip() else (name or "")
+
+
+def fuzzy_street_type(t):
+    """Repair a misspelt street type (edit distance 1, or 2 for long words); ties favour the longer word."""
+    from rapidfuzz.distance import OSA
+    if len(t) < 4 or t in ADDR_CANON or t in STREET_TYPES:
+        return t
+    best = None
+    for w in STREET_TYPES:
+        if w[0] != t[0]:
+            continue
+        d = OSA.distance(t, w)
+        if d <= (1 if len(w) <= 5 else 2) and (best is None or d < best[1] or (d == best[1] and len(w) > len(best[0]))):
+            best = (w, d)
+    return best[0] if best else t
 
 
 def is_latin_token(t):
@@ -136,7 +176,7 @@ def name_tokens(name, tdict=None):
 
     Returns (tokens, is_domain) where tokens is the full canonical list.
     """
-    s = fold(name or "")
+    s = fold(_lig(name_main(name)))
     s = _JUNK_PAREN.sub(" ", s)
     s = _LONGNUM.sub(" ", s)
     is_domain = False
@@ -144,7 +184,7 @@ def name_tokens(name, tdict=None):
     if m:
         is_domain = True
         s = m.group(1).replace("-", " ")
-    s = s.replace("&", " and ").replace("'", "").replace("’", "")
+    s = s.replace("&", " and ").replace("+", " and ").replace("'", "").replace("’", "")
     toks = [t for t in _SPLIT.split(s) if t]
     toks = [_translit(t, tdict) for t in toks]
     toks = " ".join(toks).split()
@@ -168,25 +208,62 @@ def name_core(toks):
     return out
 
 
-def addr_tokens(addr, tdict=None):
-    """Canonical ASCII token list and normalised number list for an address."""
-    s = fold(clean_address_raw(addr))
-    nums = [n.lstrip("0") or "0" for n in _DIGITS.findall(s)]
-    s = s.replace("'", " ")
-    toks = [t for t in _SPLIT.split(s) if t]
-    toks = [_translit(t, tdict) for t in toks]
-    toks = " ".join(toks).split()
+def _addr_clean(addr):
+    s = fold(_lig(clean_address_raw(addr)))
+    s = _NUMERO.sub(" ", s)
+    return _NUM_SUFFIX.sub(r"\1 ", s)
+
+
+def _comp_tokens(comp, tdict):
+    """Canonical alpha tokens of one address component (street-type slot typo-repaired)."""
+    raw = [t for t in _SPLIT.split(comp.replace("'", " ")) if t]
+    for i, t in enumerate(raw):  # the word right after the first house number is the street type in FR
+        if t.isdigit():
+            if i + 1 < len(raw) and raw[i + 1].isalpha() and is_latin_token(raw[i + 1]):
+                raw[i + 1] = fuzzy_street_type(raw[i + 1])
+            break
+    toks = " ".join(_translit(t, tdict) for t in raw).split()
     out = []
     for t in toks:
         if t.isdigit():
             continue
         # split alnum like 'b3' / 'srno58p' into alpha part only (digits are in nums)
-        t = re.sub(r"\d+", " ", t).strip()
-        for u in t.split():
+        for u in re.sub(r"\d+", " ", t).split():
             u = ADDR_CANON.get(u, u)
             if u not in ADDR_NOISE:
                 out.append(u)
+    return out
+
+
+def addr_tokens(addr, tdict=None):
+    """Canonical ASCII token list and normalised number list for an address."""
+    s = _addr_clean(addr)
+    nums = [n.lstrip("0") or "0" for n in _DIGITS.findall(s)]
+    out = []
+    for comp in s.split(","):
+        out.extend(_comp_tokens(comp, tdict))
     return out, nums
+
+
+def addr_components(addr, tdict=None):
+    """(street tokens, [locality component strings]).
+
+    The street component is the first comma-separated component holding a digit
+    (else the first component); every other non-empty component is a locality
+    (city, district, state / region ...), kept as a canonical string.
+    """
+    comps = [c for c in _addr_clean(addr).split(",") if c.strip()]
+    if not comps:
+        return [], []
+    si = next((i for i, c in enumerate(comps) if _DIGITS.search(c)), 0)
+    street = _comp_tokens(comps[si], tdict)
+    locs = []
+    for i, c in enumerate(comps):
+        if i != si:
+            t = " ".join(_comp_tokens(c, tdict))
+            if t and t not in locs:
+                locs.append(t)
+    return street, locs
 
 
 def script_of(s):

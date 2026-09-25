@@ -25,6 +25,8 @@ import polars as pl
 from .common import Paths, effective_cpus, log, save_json, timer
 
 RANK_FOLDS = [1, 2, 3, 4]
+# source id: formatting of French S2 records resembles training S3, so the model must not condition on it
+DROP_FEATS = ["q_src"]
 
 
 def labels_and_folds(P, cands):
@@ -56,10 +58,11 @@ def load_matrix(P, split, stage):
     if stage == "prune":
         cands = pl.read_parquet(P.w("cands", f"{split}.parquet"), columns=["q_idx", "s1_idx"])
         X = pl.read_parquet(P.w("feats", f"{split}.parquet"))
-        return cands, X
+        return cands, X.drop([c for c in DROP_FEATS if c in X.columns])
     pr = pl.read_parquet(P.w("pruned", f"{split}.parquet"))
     feats = pl.read_parquet(P.w("feats", f"{split}.parquet"))
     X = feats[pr["row"].to_numpy()]
+    X = X.drop([c for c in DROP_FEATS if c in X.columns])
     xe = np.load(P.w("xenc", f"{split}.npy"))
     if len(xe) != pr.height:
         raise RuntimeError(f"xenc/{split}.npy has {len(xe)} scores but pruned has {pr.height} pairs: re-run xenc")

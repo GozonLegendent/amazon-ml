@@ -33,16 +33,36 @@ def _norm_chunk(rows):
         nt, dom = tn.name_tokens(name, ndict)
         core = tn.name_core(nt)
         at, nums = tn.addr_tokens(addr, adict)
+        street, locs = tn.addr_components(addr, adict)
         out.append((
             tn.model_text(name, addr), " ".join(nt), " ".join(core), dom,
             " ".join(at), " ".join(nums), tn.script_of(name or ""),
-            not bool(tn.clean_address_raw(addr)),
+            not bool(tn.clean_address_raw(addr)), " ".join(street), "|".join(locs),
         ))
     return out
 
 
 NORM_COLS = [("mtext", pl.Utf8), ("ntok", pl.Utf8), ("ncore", pl.Utf8), ("ndom", pl.Boolean),
-             ("atok", pl.Utf8), ("anum", pl.Utf8), ("nscript", pl.Int8), ("amiss", pl.Boolean)]
+             ("atok", pl.Utf8), ("anum", pl.Utf8), ("nscript", pl.Int8), ("amiss", pl.Boolean),
+             ("astreet", pl.Utf8), ("aloc", pl.Utf8)]
+
+
+def add_fine_localities(s1):
+    """For each Source 1 entity: its two least common locality components (city /
+    district before state / region), learned from Source 1 frequencies only, and the
+    share of same-country entities that carry the finest one."""
+    ex = (s1.select("idx", "country", pl.col("aloc").str.split("|").alias("loc")).explode("loc")
+            .filter(pl.col("loc").is_not_null() & (pl.col("loc") != "")))
+    n_c = s1.group_by("country").len().rename({"len": "n_c"})
+    ex = (ex.join(ex.group_by("country", "loc").len(), on=["country", "loc"])
+            .join(n_c, on="country").sort("idx", "len"))
+    top = ex.group_by("idx", maintain_order=True).agg(pl.col("loc").head(2), (pl.col("len") / pl.col("n_c")).first().alias("sh"))
+    s1 = s1.join(top, on="idx", how="left", maintain_order="left").with_columns(
+        pl.col("loc").list.get(0, null_on_oob=True).fill_null("").alias("afine1"),
+        pl.col("loc").list.get(1, null_on_oob=True).fill_null("").alias("afine2"),
+        pl.col("sh").fill_null(0.0).cast(pl.Float32).alias("afine1_share"),
+    ).drop("loc", "sh").sort("idx")
+    return s1
 
 
 def normalise(df, td, workers, chunk=20000, block=1_000_000):
@@ -163,6 +183,8 @@ def main():
         for nm, df in (("s1", s1), ("q", q)):
             with timer(f"normalise {split}/{nm} ({df.height} rows)"):
                 df = normalise(df, tdt, args.workers)
+                if nm == "s1":
+                    df = add_fine_localities(df)
                 df.write_parquet(P.w(split, f"{nm}.parquet"))
         log.info(f"{split} countries S1: {dict(s1['country'].value_counts().iter_rows())}")
 

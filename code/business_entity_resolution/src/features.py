@@ -105,8 +105,8 @@ def num_feats(na, nb, ia, ib):
 
 def build(P, split, workers):
     cands = pl.read_parquet(P.w("cands", f"{split}.parquet"))
-    cols = ["idx", "ntok", "ncore", "ndom", "atok", "anum", "nscript", "amiss", "country"]
-    s1 = pl.read_parquet(P.w(split, "s1.parquet"), columns=cols)
+    cols = ["idx", "ntok", "ncore", "ndom", "atok", "anum", "nscript", "amiss", "country", "astreet"]
+    s1 = pl.read_parquet(P.w(split, "s1.parquet"), columns=cols + ["afine1", "afine2", "afine1_share"])
     q = pl.read_parquet(P.w(split, "q.parquet"), columns=cols + ["src"])
     ia, ib = cands["s1_idx"].to_numpy(), cands["q_idx"].to_numpy()
     F = {}
@@ -160,6 +160,23 @@ def build(P, split, workers):
         F["a_tsort"] = _cp(A_a, B_a, fuzz.token_sort_ratio, workers)
         F["a_partial"] = _cp(A_a, B_a, fuzz.partial_ratio, workers)
         del A_a, B_a
+
+    with timer(f"{split}: street / locality structure"):
+        s_st, q_st = s1["astreet"].to_list(), q["astreet"].to_list()
+        A_s = [s_st[i] for i in ia]; B_s = [q_st[i] for i in ib]
+        F["st_ratio"] = _cp(A_s, B_s, fuzz.ratio, workers)
+        F["st_tset"] = _cp(A_s, B_s, fuzz.token_set_ratio, workers)
+        F["st_empty"] = (np.array([not x for x in A_s], np.float32) + 2 * np.array([not x for x in B_s], np.float32))
+        del A_s, B_s
+        B_a = [q_atok[i] for i in ib]
+        for k in ("afine1", "afine2"):
+            f = s1[k].to_list()
+            A_f = [f[i] for i in ia]
+            F[f"{k}_in_q"] = np.where([bool(x) for x in A_f], _cp(A_f, B_a, fuzz.token_set_ratio, workers), -1).astype(np.float32)
+            F[f"{k}_in_q_part"] = np.where([bool(x) for x in A_f], _cp(A_f, B_a, fuzz.partial_ratio, workers), -1).astype(np.float32)
+            del A_f
+        del B_a
+        F["afine1_share"] = np.log(s1["afine1_share"].to_numpy()[ia] + 1e-6).astype(np.float32)
 
     with timer(f"{split}: TF-IDF cosines"):
         for name, sa, qa, an, ng in (("c_tfidf", s_core, q_core, "word", (1, 1)),
