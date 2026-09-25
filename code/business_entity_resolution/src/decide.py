@@ -39,8 +39,15 @@ def f05_macro(pred, gt, universe):
     return u["f"].mean(), u
 
 
+def load_scores(P, split, source):
+    """source='scored': final ranker; source='pruned': pruner probabilities (quick baseline)."""
+    if source == "pruned":
+        return pl.read_parquet(P.w("pruned", f"{split}.parquet"), columns=["q_idx", "s1_idx", "p_a"]).rename({"p_a": "p"})
+    return pl.read_parquet(P.w("scored", f"{split}.parquet"))
+
+
 def tune(P, args):
-    scored = pl.read_parquet(P.w("scored", "train.parquet"))
+    scored = load_scores(P, "train", args.scores)
     s1 = pl.read_parquet(P.w("train", "s1.parquet"), columns=["idx", "fold", "country"])
     val = s1.filter(pl.col("fold") == 0).select(pl.col("idx").alias("s1_idx"), "country")
     gt = pl.read_parquet(P.w("train", "gt.parquet")).join(val.select("s1_idx"), on="s1_idx")
@@ -62,12 +69,13 @@ def tune(P, args):
              f"micro recall {u['tp'].sum() / max(1, u['ngt'].sum()):.4f}")
     for c, g in u.group_by("country"):
         log.info(f"  country {c[0]}: F0.5 {g['f'].mean():.4f} over {g.height}")
-    save_json({"threshold": t_best, "val_f05": f, "sweep": res}, P.w("decision.json"))
+    save_json({"threshold": t_best, "val_f05": f, "scores": args.scores, "sweep": res},
+              P.w("decision.json" if args.scores == "scored" else f"decision_{args.scores}.json"))
     return t_best
 
 
-def write_outputs(P, t, out_dir):
-    scored = pl.read_parquet(P.w("scored", "test.parquet"))
+def write_outputs(P, t, out_dir, source):
+    scored = load_scores(P, "test", source)
     pruned = pl.read_parquet(P.w("pruned", "test.parquet"), columns=["q_idx", "s1_idx"])
     s1 = pl.read_parquet(P.w("test", "s1.parquet"), columns=["idx", "entity_id"]).rename(
         {"idx": "s1_idx", "entity_id": "source1_entity_id"})
@@ -94,12 +102,14 @@ def main():
     ap.add_argument("--work-dir", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--threshold", type=float, default=None, help="skip tuning and use this")
+    ap.add_argument("--scores", choices=["scored", "pruned"], default="scored",
+                    help="which pair probabilities to decode (pruned = quick baseline before the cross-encoder)")
     args = ap.parse_args()
     P = Paths(args.data_dir, args.work_dir)
     with timer("tune threshold on validation fold"):
         t = args.threshold if args.threshold is not None else tune(P, args)
     with timer("write test outputs"):
-        write_outputs(P, t, args.out_dir)
+        write_outputs(P, t, args.out_dir, args.scores)
 
 
 if __name__ == "__main__":
