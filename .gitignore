@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+output/*.tsv
+work/
+logs/
+dev_data/
+dev_work/
+*.zip
+wheels/
+*.npy
+*.parquet
