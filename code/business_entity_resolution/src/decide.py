@@ -1,10 +1,15 @@
 """Step 8: turn pair probabilities into matches and write the submission files.
 
 In the training labels every Source 2/3 record matches at most one Source 1
-entity, so each query is assigned to its single most probable Source 1 entity,
-and only if that probability clears a threshold t. t is chosen by maximising the
-exact challenge metric (macro F0.5 over the validation-fold Source 1 entities,
-singletons included) on the training split, then applied unchanged to test.
+entity, so each query is first reduced to its single most probable Source 1
+entity. Two ways to decide which of those links to keep are evaluated on the
+validation fold with the exact challenge metric (macro F0.5 per Source 1 entity,
+singletons included), and the better one is applied unchanged to test:
+  * threshold - keep a link if p >= t
+  * ef        - expected-F0.5 decoding: for each Source 1 entity, enumerate every
+                true/false labelling of its candidate links weighted by their
+                (temperature-calibrated) probabilities and keep the top-k that
+                maximises expected F0.5 (k = 0 is the "singleton" choice)
 
 Writes output/matching_results.tsv and output/candidate_pairs.tsv (the pruned
 candidate set that the final model scored).
@@ -39,6 +44,39 @@ def f05_macro(pred, gt, universe):
     return u["f"].mean(), u
 
 
+def _calib(p, a):
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    z = a * np.log(p / (1 - p))
+    return 1 / (1 + np.exp(-z))
+
+
+def ef_select(best, a=1.0, miss=0.0, floor=0.01, nmax=10):
+    """Expected-F0.5 top-k per Source 1 entity. best: (q_idx, s1_idx, p) with one row per query."""
+    c = (best.filter(pl.col("p") >= floor).sort("s1_idx", "p", descending=[False, True])
+             .group_by("s1_idx", maintain_order=True).head(nmax)
+             .with_columns(pl.col("p").rank("ordinal", descending=True).over("s1_idx").cast(pl.Int32).alias("r"),
+                           pl.len().over("s1_idx").alias("n")))
+    keep = []
+    for n in sorted(c["n"].unique().to_list()):
+        g = c.filter(pl.col("n") == n).sort("s1_idx", "r")
+        m = g.height // n
+        pm = _calib(g["p"].to_numpy(), a).reshape(m, n)
+        Y = ((np.arange(2 ** n)[:, None] >> np.arange(n)[None, :]) & 1).astype(np.float64)   # configs x n
+        W = np.exp(np.log(pm) @ Y.T + np.log1p(-pm) @ (1 - Y).T)                              # m x configs
+        gsum = Y.sum(1) + miss
+        E = np.empty((m, n + 1))
+        E[:, 0] = W @ ((Y.sum(1) == 0) * np.exp(-miss))
+        for k in range(1, n + 1):
+            tp = Y[:, :k].sum(1)
+            E[:, k] = W @ np.where(tp > 0, 1.25 * tp / (0.25 * gsum + k), 0.0)
+        kstar = E.argmax(1)
+        sel = (np.arange(1, n + 1)[None, :] <= kstar[:, None]).ravel()
+        keep.append(g.filter(pl.Series(sel)))
+    if not keep:
+        return best.head(0).select("s1_idx", "q_idx")
+    return pl.concat(keep).select("s1_idx", "q_idx")
+
+
 def load_scores(P, split, source):
     """source='scored': final ranker; source='pruned': pruner probabilities (quick baseline)."""
     if source == "pruned":
@@ -47,7 +85,7 @@ def load_scores(P, split, source):
 
 
 def tune(P, args):
-    scored = load_scores(P, "train", args.scores)
+    scored = pl.read_parquet(args.scored_file) if args.scored_file else load_scores(P, "train", args.scores)
     s1 = pl.read_parquet(P.w("train", "s1.parquet"), columns=["idx", "fold", "country"])
     val = s1.filter(pl.col("fold") == 0).select(pl.col("idx").alias("s1_idx"), "country")
     gt = pl.read_parquet(P.w("train", "gt.parquet")).join(val.select("s1_idx"), on="s1_idx")
@@ -61,30 +99,46 @@ def tune(P, args):
         res.append((float(t), float(f)))
     t_best, f_best = max(res, key=lambda r: r[1])
     log.info("threshold sweep: " + " ".join(f"{t:.2f}:{f:.4f}" for t, f in res[::5]))
-    f, u = f05_macro(best.filter(pl.col("p") >= t_best).select("s1_idx", "q_idx"), gt, val.select("s1_idx"))
+    log.info(f"best threshold {t_best:.2f}: {f_best:.5f}")
+    ef_res = []
+    for a in (0.8, 1.0, 1.25, 1.5, 2.0):
+        for miss in (0.0, 0.05, 0.15):
+            fe, _ = f05_macro(ef_select(best, a, miss), gt, val.select("s1_idx"))
+            ef_res.append((a, miss, float(fe)))
+    a_best, m_best, fe_best = max(ef_res, key=lambda r: r[2])
+    log.info("expected-F sweep (a, miss, F): " + " ".join(f"{a}/{m}:{f:.4f}" for a, m, f in ef_res))
+    mode = {"mode": "ef", "a": a_best, "miss": m_best} if fe_best > f_best else {"mode": "threshold", "t": t_best}
+    log.info(f"decision rule: {mode} (threshold {f_best:.5f} vs expected-F {fe_best:.5f})")
+    pred = (ef_select(best, a_best, m_best) if mode["mode"] == "ef"
+            else best.filter(pl.col("p") >= t_best).select("s1_idx", "q_idx"))
+    f, u = f05_macro(pred, gt, val.select("s1_idx"))
     u = u.join(val, on="s1_idx")
     sing = u.filter(pl.col("ngt") == 0)
     nons = u.filter(pl.col("ngt") > 0)
-    log.info(f"VALIDATION macro F0.5 = {f:.5f} at t={t_best:.2f} | {u.height} S1 entities")
+    log.info(f"VALIDATION macro F0.5 = {f:.5f} with {mode} | {u.height} S1 entities")
     log.info(f"  singletons: {sing.height} scored {sing['f'].mean():.4f} | "
              f"non-singletons: {nons.height} scored {nons['f'].mean():.4f}")
     log.info(f"  micro precision {u['tp'].sum() / max(1, u['npred'].sum()):.4f} | "
              f"micro recall {u['tp'].sum() / max(1, u['ngt'].sum()):.4f}")
     for c, g in u.group_by("country"):
         log.info(f"  country {c[0]}: F0.5 {g['f'].mean():.4f} over {g.height}")
-    save_json({"threshold": t_best, "val_f05": f, "scores": args.scores, "sweep": res},
-              P.w("decision.json" if args.scores == "scored" else f"decision_{args.scores}.json"))
-    return t_best
+    if not args.eval_only:
+        save_json({"threshold": t_best, "rule": mode, "val_f05": f, "scores": args.scores, "sweep": res, "ef_sweep": ef_res},
+                  P.w("decision.json" if args.scores == "scored" else f"decision_{args.scores}.json"))
+    return mode
 
 
-def write_outputs(P, t, out_dir, source):
+def write_outputs(P, rule, out_dir, source):
     scored = load_scores(P, "test", source)
     pruned = pl.read_parquet(P.w("pruned", "test.parquet"), columns=["q_idx", "s1_idx"])
     s1 = pl.read_parquet(P.w("test", "s1.parquet"), columns=["idx", "entity_id"]).rename(
         {"idx": "s1_idx", "entity_id": "source1_entity_id"})
     qid = pl.read_parquet(P.w("test", "q.parquet"), columns=["idx", "entity_id"]).rename(
         {"idx": "q_idx", "entity_id": "qid"})
-    best = best_per_query(scored).filter(pl.col("p") >= t).select("s1_idx", "q_idx")
+    top = best_per_query(scored)
+    best = (ef_select(top, rule["a"], rule["miss"]) if rule["mode"] == "ef"
+            else top.filter(pl.col("p") >= rule["t"]).select("s1_idx", "q_idx"))
+    log.info(f"test decision rule: {rule}")
     os.makedirs(out_dir, exist_ok=True)
     for pairs, col, fname in ((best, "matched_entity_ids", "matching_results.tsv"),
                               (pruned, "candidate_entity_ids", "candidate_pairs.tsv")):
@@ -105,14 +159,18 @@ def main():
     ap.add_argument("--work-dir", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--threshold", type=float, default=None, help="skip tuning and use this")
+    ap.add_argument("--scored-file", default=None, help="evaluate this train scores parquet instead (with --eval-only)")
+    ap.add_argument("--eval-only", action="store_true", help="only report validation, write nothing")
     ap.add_argument("--scores", choices=["scored", "pruned"], default="scored",
                     help="which pair probabilities to decode (pruned = quick baseline before the cross-encoder)")
     args = ap.parse_args()
     P = Paths(args.data_dir, args.work_dir)
-    with timer("tune threshold on validation fold"):
-        t = args.threshold if args.threshold is not None else tune(P, args)
+    with timer("tune decision rule on validation fold"):
+        rule = {"mode": "threshold", "t": args.threshold} if args.threshold is not None else tune(P, args)
+    if args.eval_only:
+        return
     with timer("write test outputs"):
-        write_outputs(P, t, args.out_dir, args.scores)
+        write_outputs(P, rule, args.out_dir, args.scores)
 
 
 if __name__ == "__main__":
