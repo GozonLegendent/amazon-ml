@@ -21,16 +21,48 @@ import torch
 from .common import Paths, log, timer
 
 
-def topk_chunks(A, B, k, chunk):
-    """For each row of A (on device) return top-k cosine vs rows of B (on device)."""
-    k = min(k, B.shape[0])
-    vals, idx = [], []
-    for i in range(0, A.shape[0], chunk):
-        s = A[i:i + chunk] @ B.T
-        v, j = s.topk(k, dim=1)
-        vals.append(v.float().cpu())
-        idx.append(j.int().cpu())
-    return torch.cat(vals).numpy(), torch.cat(idx).numpy()
+def knn(Q, D, k, budget, dev):
+    """Exact top-k inner product of every row of Q against rows of D.
+
+    Q, D are CPU fp16 tensors. Works inside a fixed GPU memory budget (bytes):
+    D is processed in column blocks that fit, Q in row chunks, and per-block
+    top-k lists are merged, so any size runs on a small / shared GPU.
+    """
+    nq, d = Q.shape
+    nd = D.shape[0]
+    k = min(k, nd)
+    db = int(min(nd, max(1024, budget * 0.35 // (2 * d))))           # D block rows
+    qc = int(max(64, min(nq, budget * 0.45 // (db * 2 * 3))))         # sims + topk workspace
+    best_v = torch.empty((nq, k), dtype=torch.float32)
+    best_i = torch.empty((nq, k), dtype=torch.int32)
+    for bi, c0 in enumerate(range(0, nd, db)):
+        Dg = D[c0:c0 + db].to(dev, non_blocking=True)
+        for q0 in range(0, nq, qc):
+            s = Q[q0:q0 + qc].to(dev, non_blocking=True) @ Dg.T
+            v, j = s.topk(min(k, Dg.shape[0]), dim=1)
+            v, j = v.float(), (j + c0).int()
+            if bi > 0:
+                v = torch.cat([best_v[q0:q0 + qc].to(dev), v], 1)
+                j = torch.cat([best_i[q0:q0 + qc].to(dev), j], 1)
+                v, o = v.topk(k, dim=1)
+                j = j.gather(1, o)
+            if v.shape[1] < k:  # only when the first block is smaller than k
+                pad = k - v.shape[1]
+                v = torch.cat([v, torch.full((v.shape[0], pad), -9.0, device=dev)], 1)
+                j = torch.cat([j, torch.zeros((j.shape[0], pad), dtype=torch.int32, device=dev)], 1)
+            best_v[q0:q0 + qc] = v.cpu()
+            best_i[q0:q0 + qc] = j.cpu()
+        del Dg
+    return best_v.numpy(), best_i.numpy()
+
+
+def gpu_budget(args):
+    """GPU bytes we allow ourselves: --gpu-mem-gb, else 60% of what is free right now."""
+    if args.gpu_mem_gb:
+        return int(args.gpu_mem_gb * 2**30)
+    if torch.cuda.is_available():
+        return int(torch.cuda.mem_get_info()[0] * 0.6)
+    return 2 * 2**30
 
 
 def retrieve_split(P, split, args, dev):
@@ -47,12 +79,21 @@ def retrieve_split(P, split, args, dev):
             log.info(f"{split}/{c}: S1={len(si)} Q={len(qi)} -> no candidates")
             continue
         with timer(f"{split}/{c}: dense kNN S1={len(si)} Q={len(qi)}"):
-            A = torch.from_numpy(np.ascontiguousarray(E1[si])).to(dev)
-            B = torch.from_numpy(np.ascontiguousarray(EQ[qi])).to(dev)
-            fv, fj = topk_chunks(B, A, args.k, args.chunk)          # query -> S1
-            rv, rj = topk_chunks(A, B, args.r, max(64, args.chunk // 4))  # S1 -> query
+            A = torch.from_numpy(np.ascontiguousarray(E1[si]))
+            B = torch.from_numpy(np.ascontiguousarray(EQ[qi]))
+            if dev == "cuda":
+                A, B = A.pin_memory(), B.pin_memory()
+            else:
+                A, B = A.float(), B.float()
+            budget = gpu_budget(args)
+            fv, fj = knn(B, A, args.k, budget, dev)                  # query -> S1
+            if args.r > 0:
+                rv, rj = knn(A, B, args.r, budget, dev)              # S1 -> query
+            else:
+                rv, rj = np.zeros((len(si), 0), np.float32), np.zeros((len(si), 0), np.int32)
             del A, B
-            torch.cuda.empty_cache() if dev == "cuda" else None
+            if dev == "cuda":
+                torch.cuda.empty_cache()
         kq, kr = fj.shape[1], rj.shape[1]
         fwd = pl.DataFrame({
             "q_idx": np.repeat(qi, kq).astype(np.int32),
@@ -100,7 +141,7 @@ def main():
     ap.add_argument("--k", type=int, default=10, help="S1 candidates per query")
     ap.add_argument("--r", type=int, default=10, help="query candidates per S1 (reverse)")
     ap.add_argument("--rev-min-cos", type=float, default=-2.0)
-    ap.add_argument("--chunk", type=int, default=2048)
+    ap.add_argument("--gpu-mem-gb", type=float, default=0, help="GPU memory budget; 0 = 60%% of free")
     ap.add_argument("--splits", default="train,test")
     args = ap.parse_args()
     P = Paths(args.data_dir, args.work_dir)

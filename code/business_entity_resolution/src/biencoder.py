@@ -92,8 +92,12 @@ def make_batches(pairs, s1, bs, max_pairs, seed):
     return batches
 
 
+def device():
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def train(P, args):
-    dev = "cuda"
+    dev = device()
     s1 = pl.read_parquet(P.w("train", "s1.parquet"), columns=["idx", "country", "ncore", "fold", "mtext"])
     q = pl.read_parquet(P.w("train", "q.parquet"), columns=["idx", "mtext"])
     gt = pl.read_parquet(P.w("train", "gt.parquet"))
@@ -101,6 +105,12 @@ def train(P, args):
     s_txt, q_txt = s1["mtext"].to_list(), q["mtext"].to_list()
     tok = AutoTokenizer.from_pretrained(args.model)
     model = Encoder(args.model).to(dev)
+    if args.grad_ckpt:
+        # activations for 3 x bs x max_len tokens do not fit a shared GPU otherwise
+        try:
+            model.m.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        except TypeError:
+            model.m.gradient_checkpointing_enable()
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     steps_total = 0
     batches_ep = []
@@ -115,7 +125,7 @@ def train(P, args):
         dl = DataLoader(BatchDS(batches_ep[ep], s_txt, q_txt, tok, args.max_len), batch_size=None,
                         shuffle=False, num_workers=args.num_workers, prefetch_factor=4 if args.num_workers else None)
         for qe, se, he, si, hi in dl:
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast(dev, dtype=torch.bfloat16, enabled=dev == "cuda"):
                 zq = model(qe["input_ids"].to(dev), qe["attention_mask"].to(dev))
                 zs = model(se["input_ids"].to(dev), se["attention_mask"].to(dev))
                 zh = model(he["input_ids"].to(dev), he["attention_mask"].to(dev))
@@ -141,7 +151,9 @@ def train(P, args):
             step += 1
             if step % 200 == 0 or step == 1:
                 acc = (logits.argmax(1) == lbl).float().mean().item()
-                log.info(f"ep {ep} step {step}/{steps_total} loss {loss.item():.4f} in-batch acc {acc:.4f}")
+                mem = torch.cuda.max_memory_allocated() / 2**30 if dev == "cuda" else 0.0
+                log.info(f"ep {ep} step {step}/{steps_total} loss {loss.item():.4f} "
+                         f"in-batch acc {acc:.4f} peak mem {mem:.1f} GiB")
     P.w("models", "bienc", "config.json")  # creates the directory
     model.m.save_pretrained(P.w("models", "bienc"))
     tok.save_pretrained(P.w("models", "bienc"))
@@ -163,10 +175,12 @@ class TextDS(Dataset):
 
 @torch.no_grad()
 def embed(P, args):
-    dev = "cuda"
+    dev = device()
     path = P.w("models", "bienc")
     tok = AutoTokenizer.from_pretrained(path)
-    model = Encoder(path).to(dev).eval().to(torch.bfloat16)
+    model = Encoder(path).to(dev).eval()
+    if dev == "cuda":
+        model = model.to(torch.bfloat16)
     for split in ("train", "test"):
         for nm in ("s1", "q"):
             out_p = P.w("emb", f"{split}_{nm}.npy")
@@ -192,14 +206,15 @@ def main():
     ap.add_argument("--data-dir", required=True)
     ap.add_argument("--work-dir", required=True)
     ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--bs", type=int, default=1024)
-    ap.add_argument("--enc-bs", type=int, default=2048)
+    ap.add_argument("--bs", type=int, default=768)
+    ap.add_argument("--no-grad-ckpt", dest="grad_ckpt", action="store_false")
+    ap.add_argument("--enc-bs", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--tau", type=float, default=0.05)
     ap.add_argument("--epochs", type=int, default=1)
-    ap.add_argument("--max-pairs", type=int, default=4_000_000)
+    ap.add_argument("--max-pairs", type=int, default=3_000_000)
     ap.add_argument("--max-len", type=int, default=80)
-    ap.add_argument("--num-workers", type=int, default=6)
+    ap.add_argument("--num-workers", type=int, default=12)
     ap.add_argument("--skip-train", action="store_true")
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()
