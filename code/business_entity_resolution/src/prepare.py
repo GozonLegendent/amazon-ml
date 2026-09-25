@@ -141,13 +141,14 @@ def main():
                 .select("q_idx", "s1_idx"))
         log.info(f"train gt pairs: {gt.height}")
 
+    s1 = s1.with_columns(pl.Series("fold", val_fold(s1["entity_id"].to_list()), pl.Int8))
     with timer("learn transliteration dictionary"):
-        td = learn_translit(s1, q, gt)
+        # learned only from non-validation pairs so the validation score stays honest
+        td = learn_translit(s1, q, gt.join(s1.filter(pl.col("fold") != 0).select(pl.col("idx").alias("s1_idx")), on="s1_idx"))
         save_json(td, P.w("translit.json"))
     tdt = (td["name"], td["addr"])
 
-    # folds: S1 by id hash; queries inherit their true S1's fold, else own hash
-    s1 = s1.with_columns(pl.Series("fold", val_fold(s1["entity_id"].to_list()), pl.Int8))
+    # folds: S1 by id hash (above); queries inherit their true S1's fold, else own hash
     q = q.with_columns(pl.Series("fold", val_fold(q["entity_id"].to_list()), pl.Int8))
     qf = gt.join(s1.select(pl.col("idx").alias("s1_idx"), pl.col("fold").alias("tf")), on="s1_idx")
     q = q.join(qf.select(pl.col("q_idx").alias("idx"), "tf", pl.col("s1_idx").alias("true_s1")),

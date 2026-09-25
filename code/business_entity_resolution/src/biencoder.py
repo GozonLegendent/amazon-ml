@@ -6,8 +6,8 @@ Loss : symmetric InfoNCE with in-batch negatives. Batches are drawn from a singl
        country so in-batch negatives are realistic, and every pair carries one mined
        hard negative: another Source 1 record with the same core name (different
        entity), which forces the encoder to use the address to disambiguate.
-Only pairs whose Source 1 entity is in the training folds (fold != 0) are used,
-so the validation fold stays unseen.
+Only pairs whose Source 1 entity is in the base-model folds (5-9) are used, so
+the ranker folds (1-4) and the validation fold (0) stay unseen by this model.
 """
 import argparse
 import math
@@ -26,6 +26,7 @@ from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warm
 from .common import Paths, log, timer
 
 DEFAULT_MODEL = "intfloat/multilingual-e5-small"
+BASE_FOLDS = [5, 6, 7, 8, 9]  # folds used to train base models (bi-encoder, cross-encoder)
 
 
 class Encoder(torch.nn.Module):
@@ -101,7 +102,8 @@ def train(P, args):
     s1 = pl.read_parquet(P.w("train", "s1.parquet"), columns=["idx", "country", "ncore", "fold", "mtext"])
     q = pl.read_parquet(P.w("train", "q.parquet"), columns=["idx", "mtext"])
     gt = pl.read_parquet(P.w("train", "gt.parquet"))
-    tr = gt.join(s1.select(pl.col("idx").alias("s1_idx"), "fold"), on="s1_idx").filter(pl.col("fold") != 0)
+    tr = gt.join(s1.select(pl.col("idx").alias("s1_idx"), "fold"), on="s1_idx").filter(
+        pl.col("fold").is_in(BASE_FOLDS))
     s_txt, q_txt = s1["mtext"].to_list(), q["mtext"].to_list()
     tok = AutoTokenizer.from_pretrained(args.model)
     model = Encoder(args.model).to(dev)
