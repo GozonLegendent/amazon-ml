@@ -14,6 +14,8 @@ transfers to labels unseen in training, e.g. France):
 Output: feats/{split}.parquet aligned row-by-row with cands/{split}.parquet.
 """
 import argparse
+import os
+from multiprocessing import get_context
 
 import numpy as np
 import polars as pl
@@ -26,6 +28,25 @@ from sklearn.preprocessing import normalize
 from .common import Paths, log, timer
 
 N_FEAT_HASH = 2 ** 21
+PROCS = min(64, os.cpu_count() or 1)
+_G = {}  # read-only data shared with forked workers
+
+
+def _pmap(fn, tasks):
+    if PROCS <= 1 or len(tasks) <= 1:
+        return [fn(t) for t in tasks]
+    with get_context("fork").Pool(PROCS) as pool:
+        return pool.map(fn, tasks)
+
+
+def _spans(n, parts):
+    step = max(20000, n // parts + 1)
+    return [(i, min(n, i + step)) for i in range(0, n, step)]
+
+
+def _hash_chunk(span):
+    texts, hv = _G["hash"]
+    return hv.transform(texts[span[0]:span[1]])
 
 
 def _vec(texts_a, texts_b, analyzer, ngram=(1, 1)):
@@ -33,16 +54,24 @@ def _vec(texts_a, texts_b, analyzer, ngram=(1, 1)):
     hv = HashingVectorizer(n_features=N_FEAT_HASH, analyzer=analyzer, ngram_range=ngram,
                            alternate_sign=False, norm=None, token_pattern=r"\S+",
                            lowercase=False, binary=True)
-    A, B = hv.transform(texts_a), hv.transform(texts_b)
+    mats = []
+    for texts in (texts_a, texts_b):
+        _G["hash"] = (texts, hv)
+        mats.append(sp.vstack(_pmap(_hash_chunk, _spans(len(texts), PROCS * 2))).tocsr())
+    A, B = mats
     tf = TfidfTransformer(sublinear_tf=True).fit(sp.vstack([A, B]))
     return normalize(tf.transform(A)).tocsr(), normalize(tf.transform(B)).tocsr()
 
 
-def _rowdot(A, B, ia, ib, chunk=2_000_000):
-    out = np.empty(len(ia), np.float32)
-    for i in range(0, len(ia), chunk):
-        out[i:i + chunk] = np.asarray(A[ia[i:i + chunk]].multiply(B[ib[i:i + chunk]]).sum(1)).ravel()
-    return out
+def _rowdot_chunk(span):
+    A, B, ia, ib = _G["dot"]
+    lo, hi = span
+    return np.asarray(A[ia[lo:hi]].multiply(B[ib[lo:hi]]).sum(1)).ravel().astype(np.float32)
+
+
+def _rowdot(A, B, ia, ib):
+    _G["dot"] = (A, B, ia, ib)
+    return np.concatenate(_pmap(_rowdot_chunk, _spans(len(ia), PROCS * 4)))
 
 
 def _cp(a, b, scorer, workers):
@@ -53,21 +82,25 @@ def _num_sets(anum):
     return [frozenset(x.split()) if x else frozenset() for x in anum]
 
 
+def _num_chunk(span):
+    na, nb, ia, ib = _G["num"]
+    lo, hi = span
+    inter = np.full(hi - lo, -1, np.float32)
+    jac = np.full(hi - lo, -1, np.float32)
+    for k in range(lo, hi):
+        a, b = na[ia[k]], nb[ib[k]]
+        if a and b:
+            i = len(a & b)
+            inter[k - lo] = i
+            jac[k - lo] = i / len(a | b)
+    return inter, jac
+
+
 def num_feats(na, nb, ia, ib):
-    """Number overlap between two addresses: shared count, Jaccard, first-number match."""
-    inter = np.empty(len(ia), np.float32)
-    jac = np.empty(len(ia), np.float32)
-    first = np.empty(len(ia), np.float32)
-    for k, (x, y) in enumerate(zip(ia, ib)):
-        a, b = na[x], nb[y]
-        if not a or not b:
-            inter[k], jac[k], first[k] = -1, -1, -1
-            continue
-        i = len(a & b)
-        inter[k] = i
-        jac[k] = i / len(a | b)
-        first[k] = 0
-    return inter, jac, first
+    """Number overlap between two addresses: shared count and Jaccard (-1 = missing)."""
+    _G["num"] = (na, nb, ia, ib)
+    parts = _pmap(_num_chunk, _spans(len(ia), PROCS * 4))
+    return np.concatenate([p[0] for p in parts]), np.concatenate([p[1] for p in parts])
 
 
 def build(P, split, workers):
@@ -142,7 +175,7 @@ def build(P, split, workers):
         A, B = _vec(s_num, q_num, "word")
         F["num_tfidf"] = _rowdot(A, B, ia, ib)
         na, nb = _num_sets(s_num), _num_sets(q_num)
-        F["num_inter"], F["num_jac"], _ = num_feats(na, nb, ia, ib)
+        F["num_inter"], F["num_jac"] = num_feats(na, nb, ia, ib)
         s_first = np.array([x.split()[0] if x else "" for x in s_num], dtype=object)
         q_first = np.array([x.split()[0] if x else "" for x in q_num], dtype=object)
         fa, fb = s_first[ia], q_first[ib]
