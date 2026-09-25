@@ -71,7 +71,15 @@ def load_matrix(P, split, stage):
         pl.len().over("q_idx").cast(pl.Float32).alias("pr_q_n"),
         pl.len().over("s1_idx").cast(pl.Float32).alias("pr_s_n"),
     )
-    X = pl.concat([X, df.drop("q_idx", "s1_idx")], how="horizontal")
+    parts = [X]
+    f2p = P.w("feats2", f"{split}.parquet")
+    if os.path.exists(f2p):  # second-stage sibling / number / cluster features
+        f2 = pl.read_parquet(f2p)
+        if f2.height != pr.height:
+            raise RuntimeError(f"feats2/{split}.parquet has {f2.height} rows but pruned has {pr.height}: re-run feats2")
+        parts.append(f2)
+    parts.append(df.drop("q_idx", "s1_idx"))
+    X = pl.concat(parts, how="horizontal")
     return pr.select("q_idx", "s1_idx", "row"), X
 
 

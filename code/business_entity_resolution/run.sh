@@ -2,7 +2,7 @@
 # Stage runner. Usage:  bash run.sh <stage> [extra args passed to the stage]
 #   prepare | bienc | retrieve | features | prune | xenc | final | decide | validate
 #   all1  = prepare -> bienc -> retrieve
-#   all2  = features -> prune -> xenc -> final -> decide -> validate
+#   all2  = features -> prune -> feats2 -> xenc -> final -> decide -> validate
 #   smoke = both chains on a 1% subset (catches bugs in a few minutes)
 # Paths default to <ROOT>/student_resource/dataset and <ROOT>/submission/...
 # Override with env vars:  DATA=/path/to/dataset WORK=/path/to/work bash run.sh prepare
@@ -30,6 +30,7 @@ chain2() {  # $1=data $2=work $3=out $4=log prefix, rest = extra xenc args
   local d=$1 w=$2 o=$3 p=$4; shift 4
   run ${p}features src.features     --data-dir "$d" --work-dir "$w"
   run ${p}prune    src.ranker       --data-dir "$d" --work-dir "$w" --stage prune
+  run ${p}feats2   src.features2    --data-dir "$d" --work-dir "$w"
   run ${p}xenc     src.crossencoder --data-dir "$d" --work-dir "$w" "$@"
   run ${p}final    src.ranker       --data-dir "$d" --work-dir "$w" --stage final
   run ${p}decide   src.decide       --data-dir "$d" --work-dir "$w" --out-dir "$o"
@@ -48,6 +49,8 @@ case "$stage" in
   retrieve) run retrieve src.retrieve     --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   features) run features src.features     --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   prune)    run prune    src.ranker       --data-dir "$DATA" --work-dir "$WORK" --stage prune "$@" ;;
+  feats2)   run feats2   src.features2    --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
+  analyze)  run analyze  src.analyze      --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   xenc)     run xenc     src.crossencoder --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   final)    run final    src.ranker       --data-dir "$DATA" --work-dir "$WORK" --stage final "$@" ;;
   decide)   run decide   src.decide       --data-dir "$DATA" --work-dir "$WORK" --out-dir "$OUT" "$@" ;;
