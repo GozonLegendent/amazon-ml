@@ -45,9 +45,10 @@ def f05_macro(pred, gt, universe):
 
 
 def _calib(p, a):
-    p = np.clip(p, 1e-6, 1 - 1e-6)
+    # float64 throughout: in float32, 1/(1+exp(-z)) rounds to exactly 1.0 for z > ~16 and log(1-p) = -inf
+    p = np.clip(np.asarray(p, np.float64), 1e-6, 1 - 1e-6)
     z = a * np.log(p / (1 - p))
-    return 1 / (1 + np.exp(-z))
+    return np.clip(1 / (1 + np.exp(-z)), 1e-12, 1 - 1e-12)
 
 
 def ef_select(best, a=1.0, miss=0.0, floor=0.01, nmax=10):
