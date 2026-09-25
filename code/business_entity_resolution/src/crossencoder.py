@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 
 from .biencoder import BASE_FOLDS, device
-from .common import Paths, log, timer
+from .common import Paths, effective_cpus, log, timer
 
 
 class CrossEncoder(torch.nn.Module):
@@ -176,10 +176,10 @@ def score(P, args):
         model = model.to(torch.bfloat16)
     for split in args.splits.split(","):
         out_p = P.w("xenc", f"{split}.npy")
-        if os.path.exists(out_p) and not args.overwrite:
+        c = pl.read_parquet(P.w("pruned", f"{split}.parquet"), columns=["q_idx", "s1_idx"])
+        if os.path.exists(out_p) and not args.overwrite and np.load(out_p, mmap_mode="r").shape[0] == c.height:
             log.info(f"skip existing {out_p}")
             continue
-        c = pl.read_parquet(P.w("pruned", f"{split}.parquet"), columns=["q_idx", "s1_idx"])
         ia, ib = c["s1_idx"].to_numpy(), c["q_idx"].to_numpy()
         s_txt = pl.read_parquet(P.w(split, "s1.parquet"), columns=["mtext"])["mtext"].to_list()
         q_txt = pl.read_parquet(P.w(split, "q.parquet"), columns=["mtext"])["mtext"].to_list()
@@ -211,7 +211,7 @@ def main():
     ap.add_argument("--lr", type=float, default=4e-5)
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--max-len", type=int, default=128)
-    ap.add_argument("--num-workers", type=int, default=12)
+    ap.add_argument("--num-workers", type=int, default=max(2, min(12, effective_cpus() - 3)))
     ap.add_argument("--splits", default="train,test")
     ap.add_argument("--skip-train", action="store_true")
     ap.add_argument("--overwrite", action="store_true")

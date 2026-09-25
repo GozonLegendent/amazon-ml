@@ -22,7 +22,7 @@ import lightgbm as lgb
 import numpy as np
 import polars as pl
 
-from .common import Paths, log, save_json, timer
+from .common import Paths, effective_cpus, log, save_json, timer
 
 RANK_FOLDS = [1, 2, 3, 4]
 
@@ -61,6 +61,8 @@ def load_matrix(P, split, stage):
     feats = pl.read_parquet(P.w("feats", f"{split}.parquet"))
     X = feats[pr["row"].to_numpy()]
     xe = np.load(P.w("xenc", f"{split}.npy"))
+    if len(xe) != pr.height:
+        raise RuntimeError(f"xenc/{split}.npy has {len(xe)} scores but pruned has {pr.height} pairs: re-run xenc")
     df = pr.select("q_idx", "s1_idx", "p_a").with_columns(pl.Series("xe", xe, pl.Float32))
     df = competition_feats(df, "xe", "xe")
     df = competition_feats(df, "p_a", "pa")
@@ -73,7 +75,7 @@ def load_matrix(P, split, stage):
     return pr.select("q_idx", "s1_idx", "row"), X
 
 
-PARAMS = dict(objective="binary", learning_rate=0.08, num_leaves=255, min_data_in_leaf=200,
+PARAMS = dict(objective="binary", learning_rate=0.1, force_col_wise=True, num_leaves=255, min_data_in_leaf=200,
               feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0,
               max_bin=255, verbose=-1)
 
@@ -140,8 +142,8 @@ def main():
     ap.add_argument("--keep", type=int, default=4, help="[prune] max candidates kept per query")
     ap.add_argument("--pmin", type=float, default=0.003, help="[prune] min probability kept")
     ap.add_argument("--rounds", type=int, default=1500)
-    ap.add_argument("--max-train-rows", type=int, default=40_000_000)
-    ap.add_argument("--threads", type=int, default=min(64, os.cpu_count()))
+    ap.add_argument("--max-train-rows", type=int, default=12_000_000)
+    ap.add_argument("--threads", type=int, default=effective_cpus())
     ap.add_argument("--splits", default="train,test")
     args = ap.parse_args()
     P = Paths(args.data_dir, args.work_dir)

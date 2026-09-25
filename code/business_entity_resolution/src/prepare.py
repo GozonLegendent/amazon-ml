@@ -15,7 +15,7 @@ from multiprocessing import Pool
 import polars as pl
 
 from . import textnorm as tn
-from .common import Paths, log, read_tsv, save_json, timer, val_fold
+from .common import Paths, effective_cpus, log, read_tsv, save_json, timer, val_fold
 
 _TD = (None, None)
 _SPLIT = re.compile(r"[^0-9a-zऀ-෿]+")
@@ -126,7 +126,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", required=True)
     ap.add_argument("--work-dir", required=True)
-    ap.add_argument("--workers", type=int, default=os.cpu_count())
+    ap.add_argument("--workers", type=int, default=effective_cpus())
     args = ap.parse_args()
     P = Paths(args.data_dir, args.work_dir)
 

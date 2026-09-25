@@ -25,10 +25,10 @@ from rapidfuzz.distance import JaroWinkler
 from sklearn.feature_extraction.text import HashingVectorizer, TfidfTransformer
 from sklearn.preprocessing import normalize
 
-from .common import Paths, log, timer
+from .common import Paths, effective_cpus, log, timer
 
 N_FEAT_HASH = 2 ** 21
-PROCS = min(64, os.cpu_count() or 1)
+PROCS = effective_cpus()
 _G = {}  # read-only data shared with forked workers
 
 
@@ -206,7 +206,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", required=True)
     ap.add_argument("--work-dir", required=True)
-    ap.add_argument("--workers", type=int, default=-1)
+    ap.add_argument("--workers", type=int, default=effective_cpus())
     ap.add_argument("--splits", default="train,test")
     args = ap.parse_args()
     P = Paths(args.data_dir, args.work_dir)

@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 
-from .common import Paths, log, timer
+from .common import Paths, effective_cpus, log, timer
 
 DEFAULT_MODEL = "intfloat/multilingual-e5-small"
 BASE_FOLDS = [5, 6, 7, 8, 9]  # folds used to train base models (bi-encoder, cross-encoder)
@@ -186,10 +186,10 @@ def embed(P, args):
     for split in ("train", "test"):
         for nm in ("s1", "q"):
             out_p = P.w("emb", f"{split}_{nm}.npy")
-            if os.path.exists(out_p) and not args.overwrite:
+            txt = pl.read_parquet(P.w(split, f"{nm}.parquet"), columns=["mtext"])["mtext"].to_list()
+            if os.path.exists(out_p) and not args.overwrite and np.load(out_p, mmap_mode="r").shape[0] == len(txt):
                 log.info(f"skip existing {out_p}")
                 continue
-            txt = pl.read_parquet(P.w(split, f"{nm}.parquet"), columns=["mtext"])["mtext"].to_list()
             order = np.argsort(np.fromiter((len(t) for t in txt), np.int32, len(txt)))
             out = np.lib.format.open_memmap(out_p, mode="w+", dtype=np.float16,
                                             shape=(len(txt), model.m.config.hidden_size))
@@ -216,7 +216,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--max-pairs", type=int, default=3_000_000)
     ap.add_argument("--max-len", type=int, default=80)
-    ap.add_argument("--num-workers", type=int, default=12)
+    ap.add_argument("--num-workers", type=int, default=max(2, min(12, effective_cpus() - 3)))
     ap.add_argument("--skip-train", action="store_true")
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()

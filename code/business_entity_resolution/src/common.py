@@ -17,6 +17,31 @@ if not log.handlers:
     log.setLevel(logging.INFO)
 
 
+def effective_cpus():
+    """CPUs we may actually use: affinity mask capped by the cgroup CPU quota.
+
+    Containers often report every host core in os.cpu_count() while the cgroup
+    quota allows far fewer; oversubscribing them makes OpenMP / thread pools crawl.
+    Override with BER_CPUS=<n>.
+    """
+    if os.environ.get("BER_CPUS"):
+        return max(1, int(os.environ["BER_CPUS"]))
+    n = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    try:
+        q, p = open("/sys/fs/cgroup/cpu.max").read().split()[:2]
+        if q != "max":
+            n = min(n, max(1, int(q) // int(p)))
+    except (OSError, ValueError):
+        try:
+            q = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
+            p = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+            if q > 0:
+                n = min(n, max(1, q // p))
+        except (OSError, ValueError):
+            pass
+    return n
+
+
 @contextmanager
 def timer(msg):
     t = time.time()
