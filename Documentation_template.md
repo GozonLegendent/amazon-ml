@@ -9,22 +9,29 @@
 ## 1. Executive Summary
 
 We treat entity resolution as **assignment**. In the training labels every Source 2/3 record
-matches at most one Source 1 entity, so each record is assigned to its single most probable
-Source 1 entity, or to none. The pipeline has five stages:
+matches at most one Source 1 entity, so each record is linked to its single most probable
+Source 1 entity, or to none.
 
-1. A fine-tuned multilingual bi-encoder (e5-small, MIT) runs exact GPU nearest-neighbour search
-   inside each country label.
-2. A LightGBM pruner scores 42 string, number and embedding features.
-3. A fine-tuned cross-encoder reads each surviving pair jointly.
-4. A final LightGBM combines everything with "competition" features, i.e. how a pair ranks
-   against the other candidates for the same record and the same entity.
-5. One threshold, tuned directly for the challenge's macro F0.5 on a held-out fold, decides
-   the matches.
+The pipeline has four stages:
 
-Native-script names and addresses (Hindi, Tamil, Telugu, Kannada, Bengali, Gujarati, Malayalam,
-Odia, Punjabi) are handled two ways: the multilingual transformers read them directly, and a
-native-script→Latin token dictionary learned only from the training pairs normalises them for
-the string features.
+1. **Retrieval.** A fine-tuned multilingual bi-encoder (e5-small, MIT) runs exact GPU
+   nearest-neighbour search inside each country label, in both directions.
+2. **Pruning.** A LightGBM model prunes the candidates using 50 string, number, address-structure
+   and embedding features.
+3. **Scoring.** A fine-tuned listwise cross-encoder and 29 "decoy" features score each surviving
+   pair.
+4. **Decision.** A final LightGBM model combines everything. A decision rule tuned directly for
+   the challenge's macro F0.5 (either a threshold or expected-F0.5 top-k per entity) picks the
+   matches.
+
+What sets this apart from a plain blocking-plus-classifier setup:
+
+- **A leak-free validation protocol** that places each decoy in the fold of the entity it
+  competes with.
+- **Features aimed at the dominant false-merge pattern**, "sibling" businesses a few doors down
+  the same street.
+- **Country-agnostic address structure** that generalises to France, which is absent from
+  training.
 
 ---
 
@@ -37,59 +44,84 @@ Source 3 records):
 
 | Finding | Number | Consequence |
 |---|---|---|
-| Each S2/S3 id appears in at most one ground-truth list | 7,638,365 pairs, 7,638,365 distinct ids | Model the task as "assign each record to ≤ 1 entity" |
-| S2/S3 records that match nothing (distractors) | ~2.68M (26%) | Needs an explicit "no match" option |
-| Singleton S1 entities | 5.6% | Predicting an empty list earns 1.0; any false merge earns 0 |
-| Matches per S1 entity | 0–11, mode 3 | Many records per entity, from both sources |
-| S1 entities sharing their exact name with another S1 | 38% (e.g. "Primary Care Group" ×253) | The name alone cannot identify an entity; the address must decide |
+| Each S2/S3 id appears in at most one ground-truth list | 7,638,365 pairs, 7,638,365 distinct ids | Assignment: each record goes to ≤ 1 entity |
+| S2/S3 records that match nothing | ~2.68M (26%) | Needs an explicit "no match" option |
+| Singleton S1 entities | 5.6% | An empty prediction earns 1.0; any false merge earns 0 |
+| S1 entities sharing their exact name with another S1 | 38% ("Primary Care Group" ×253) | The name alone cannot identify an entity |
 | True pairs whose country labels differ | 0 of 20,888 sampled | Blocking inside each country label is lossless |
 | Names written in native Indic scripts | ~10% of S2, ~5% of S3 | Cross-script matching is required |
-| Records with an empty address | ~3% of S2/S3 | Name-only matching must still work |
+| Unmatched US S2 records that are "sibling decoys" | 57.6% (India 36.1%) | Main source of false merges (see below) |
 
-Noise patterns observed (all generated on top of a clean S1 record):
+**Sibling decoys.** These are different businesses whose name is the real one plus a word, and
+whose address is a few doors up the same street. Example: `XMM Staffing Group, 10 Stagecoach Rd`
+next to the real `XMM Staffing Corp, 8 Stagecoach Rd`. Measured on training labels:
+
+| Signal | Decoys | True pairs |
+|---|---|---|
+| First house number equal | 0.9% (US) | 77% |
+| A number moved to a nearby value | ~90% | 0.5–1.7% |
+| "Group" or "Holdings" added to the name | ~18% | 0.00% |
+
+True pairs carry their own number noise: zero-padding (`00955`), a dropped digit (`924` vs
+`4924`), prefixes (`B3/303`), and in India an injected first number (`H.NO 53`) in 14% of pairs.
+A number mismatch alone is therefore not a reliable reject rule; the model has to combine the
+signals.
+
+**Other noise patterns.**
 
 - **Names:**
-  - legal-suffix swaps (Pvt/Private, Ltd/Limited, LLC, SARL, S.A.S.)
-  - word reordering ("Hotel Logistics Limited Private") and duplicated tokens ("Caressa's Caressa's")
-  - injected accents (Í, á), character typos, and leet-style substitutions ("Roya1")
-  - junk prefixes and suffixes (`***`, `<<`, `M/s`, `Dr`, `#51176`, `(ID: 47810)`, `- 1281460800`)
+  - legal-suffix swaps
+  - word reordering and duplicated tokens
+  - injected accents and typos
+  - junk affixes (`***`, `M/s`, `#51176`, `(ID: 47810)`)
   - domain forms (`servicespolytexagro.com`)
-  - transliteration into native scripts
-  - occasionally a fully replaced trade name ("Evoorbi"), where only the address links the records
+  - alias forms (`X dba Y`, `X fka Y`)
+  - translation into native scripts
+  - fully replaced trade names, which only the address can link
 - **Addresses:**
   - upper-casing
-  - street-type abbreviations (Rd, St, Ave, R., BD, IMP)
-  - state abbreviations or native-script state names (TX↔Texas, MH↔महाराष्ट्र)
+  - street-type abbreviations
+  - state abbreviations or native-script state names
   - reordered components
   - `NULL`/`N/A` placeholders
   - dropped components
-  - altered house numbers (`B3/303` vs `303`, `0042` vs `42`)
-  - alternate city names (Ogden vs Spencerport)
-  - region vs département for France (Nouvelle-Aquitaine vs Gironde)
+  - alternate city names
 
-The test set adds France (about 15% of test Source 1 entities), which never appears in training.
-No part of the pipeline uses the country value as a feature; it only groups records for blocking.
-Country is therefore an open set of labels, and France gets the same treatment as every other
-country.
+**France**, which appears only in test (15% of test Source 1 entities), was analysed on the test
+inputs without labels, using high-confidence rule-matched pairs:
+
+| Source | Admin component on the S2/S3 side |
+|---|---|
+| S1 | always a région |
+| S2/S3 | same région about ⅓ of the time, the département about ⅓, absent about ⅓ |
+
+Whole-address similarity for French S2 therefore looks like training S3. We compare the street
+component and the entity's finest locality instead. We also drop the source indicator from the
+model, so French S2 records are not judged as out-of-distribution S2.
 
 ### 2.2 Solution Strategy
 
-**Approach Type:** Blocking + learned re-ranking + assignment (hybrid: dense retrieval,
-gradient-boosted trees, cross-encoder).
+**Approach Type:** Blocking + learned re-ranking + assignment decoding (hybrid of dense
+retrieval, gradient-boosted trees and a cross-encoder).
 
-**Core Innovation:**
+**Core Innovations:**
 
-1. **Assignment decoding.** The ≤ 1-entity-per-record property is decoded directly: each record
-   picks its best candidate and must clear a tuned threshold. This removes a whole class of
-   false merges that independent pairwise thresholding produces.
-2. **Leak-free stacking.** Base models (bi-encoder, cross-encoder) train on folds 5–9. The
-   rankers train on folds 1–4, where base-model scores are out-of-sample, just as on test.
-   Fold 0 is held out.
-3. **Cross-script normalisation learned from the data.** A token dictionary is built by
-   aligning native-script tokens with the Latin tokens of their matched Source 1 records; no
-   external transliteration data is used.
-4. **A listwise cross-encoder with a learned "no match" slot**, so the model learns both which
-   entity wins and whether any entity matches.
+1. **Assignment decoding.** Each record is reduced to its best entity. The kept links are then
+   chosen per entity to maximise macro F0.5, either by a threshold or by the expected-F0.5 top-k.
+2. **Leak-free stacking and validation.**
+   - Base models (bi-encoder, cross-encoder, extra-word statistics) train on folds 5–9.
+   - The rankers train on folds 1–4, and the pruner's scores there are made out-of-fold.
+   - Fold 0 is held out.
+   - Unmatched records take the fold of the entity they compete with. Otherwise the decoys
+     competing with validation entities are records the ranker was trained on, and false merges
+     look rarer than they are.
+3. **Decoy-aware features.**
+   - moved house numbers with the signed distance
+   - added legal words
+   - extra-word log-odds learned from labels
+   - cluster consistency among an entity's candidate records
+4. **Country-agnostic address structure** (street component, finest locality) and a
+   native-script→Latin dictionary learned only from training pairs.
 
 ---
 
@@ -97,85 +129,124 @@ gradient-boosted trees, cross-encoder).
 
 - **Blocking keys used:**
   - **Country label** (open set) as a hard partition.
-  - Inside each partition: exact **dense nearest-neighbour search** with the fine-tuned
+  - Inside each partition, exact **dense nearest-neighbour search** with the fine-tuned
     bi-encoder, run in both directions. Each S2/S3 record retrieves its top-10 Source 1
     entities, and each Source 1 entity retrieves its top-10 S2/S3 records. The union is kept.
-  - The search is brute-force fp16 matrix multiplication on the GPU, run in blocks that fit the
-    free memory, so there is no approximate-index recall loss.
-- **Bi-encoder training:** `intfloat/multilingual-e5-small` (MIT, 118M parameters), mean pooling,
-  symmetric InfoNCE (τ = 0.05). Batches are drawn from a single country, and each pair carries
-  one mined hard negative: another Source 1 record with the same core name. It is trained on
-  3M true pairs from folds 5–9 with gradient checkpointing.
-- **Second-stage filter (pruner):** a LightGBM model on the 42 cheap features keeps at most 4
-  candidates per record with p ≥ 0.003. The pruned set is exactly what the final model scores
-  and what `candidate_pairs.tsv` contains.
-- **Candidate pairs generated:** [TBD — blocking total and pruned total for test]
+  - The search is brute-force fp16 matrix multiplication on the GPU, run in blocks sized to the
+    free memory, so there is no approximate-index loss.
+- **Bi-encoder:**
+  - `intfloat/multilingual-e5-small` (MIT, 118M parameters) with mean pooling.
+  - Symmetric InfoNCE loss (τ = 0.05). Batches are drawn from a single country, and each pair
+    carries one mined same-name hard negative.
+  - Trained on 3M true pairs from folds 5–9.
+  - It ranks the correct entity first for **97.96%** of held-out true pairs.
+- **Second-stage filter (pruner):** LightGBM keeps at most 4 candidates per record with
+  p ≥ 0.003. The pruned set is exactly what the final model scores and what
+  `candidate_pairs.tsv` contains.
+- **Candidate pairs generated (test):**
+
+  | Set | Pairs | Per record |
+  |---|---|---|
+  | Blocking | 102,303,092 | ~10.3 |
+  | Pruned (= `candidate_pairs.tsv`) | 8,702,689 | ~1.08 among records with any candidate |
+
+- **Recall on held-out fold 0** (764,025 true pairs):
+  - 99.73% after blocking (99.36% within each record's top-10)
+  - 99.12% after pruning
 - **How true matches were kept:**
-  - bidirectional retrieval, so an entity whose records crowd each other still keeps its own
-    candidates
-  - exact (not approximate) search
-  - hard negatives, which teach the encoder to use the address when names collide
-  - a pruner threshold chosen for recall
-  - blocking recall is measured on the held-out fold before and after pruning:
-    [TBD recall@10 / recall after pruning]
+  - bidirectional retrieval
+  - exact search
+  - hard-negative training, so the encoder uses the address when names collide
+  - a pruning threshold chosen for recall
 
 ---
 
 ## 4. Matching Model
 
-**Features used (42 pair features + 15 second-stage features):**
+**Pair features, blocking stage (50):**
 
-- **Name features:**
+- **Name:**
   - rapidfuzz ratio, token-sort, token-set and partial ratio on canonical tokens
-  - ratio, token-set and Jaro-Winkler on the core name (legal suffixes, honorifics and
-    stop-words removed)
-  - space-free ratio and partial ratio, for domain-style names
+  - ratio, token-set and Jaro-Winkler on the core name (legal suffixes and honorifics removed;
+    alias forms resolved to the real business)
+  - space-free ratios for domain-style names
   - IDF-weighted word cosine and character-3-gram TF-IDF cosine
-- **Address features:**
-  - rapidfuzz ratio, token-set, token-sort and partial ratio on canonical address tokens
-    (street types, directions, French street types and Indian address words mapped to one form)
-  - IDF-weighted token cosine and character-3-gram cosine
-  - numbers: TF-IDF cosine over house / unit / PIN numbers, shared-number count, Jaccard,
-    first-number equality, number counts
-- **Embedding and competition features:**
+- **Address:**
+  - fuzzy ratios, IDF-weighted and character-3-gram cosines over canonical tokens (street
+    types, directions, French and Indian address words normalised)
+  - a street-component-only similarity
+  - whether the entity's two finest localities (learned from Source 1 frequencies) appear in
+    the record, and how common the finest locality is
+  - number overlap (TF-IDF, shared count, Jaccard, first-number equality)
+- **Embedding and competition:**
   - bi-encoder cosine
   - rank of the pair in each direction
-  - gap to the record's best candidate and to the entity's best candidate
+  - gaps to the record's and the entity's best candidate
   - margin over the record's runner-up
   - candidate counts
-- **Record features:** script of the record name, missing-address flag, domain-name flag,
-  source (S2/S3), token counts, how common the Source 1 core name is inside its country.
-- **Second stage:**
-  - cross-encoder logit
-  - pruner probability
-  - rank, margin and gap of both scores within the record's group and the entity's group
-  - number of the entity's candidates with a positive cross-encoder logit
+- **Record:**
+  - name script
+  - missing-address and domain flags
+  - token counts
+  - how common the entity's core name is in its country
+
+**Decoy features on pruned pairs (29):**
+
+- **House numbers:**
+  - first-number equality, containment, gap and signed gap
+  - set-level: a number moved to a nearby value (with its signed distance), shared numbers,
+    the share of each side's numbers found on the other side
+- **Extra words:** full-name words present on only one side (not fuzzy variants), with
+  log-odds of "true pair vs wrong pair" learned on folds 5–9. The learned "different business"
+  words include `holdings, group, pvt, public, east, west, north, south, metro, lakeside`.
+- **Legal words:** legal words added or removed, a strong "group/holding" addition, and
+  legal-form conflicts.
+- **Ambiguity:** number of Source 1 entities sharing the exact full name.
+- **Cluster:** how many of the entity's other candidate records share this record's house
+  number versus the entity's own.
 
 **Model type:**
 
-1. LightGBM pruner (binary, 255 leaves).
-2. Cross-encoder: e5-small initialised from the fine-tuned bi-encoder, input
-   `<S1 text> </s> <record text>`, mean-pooled linear head, listwise softmax over each record's
-   candidates plus a learned "no match" logit.
-3. LightGBM final ranker on everything above.
+1. **LightGBM pruner** (255 leaves, early stopping on fold 0; out-of-fold on folds 1–4).
+2. **Cross-encoder:**
+   - e5-small initialised from the fine-tuned bi-encoder
+   - input `<S1 text> </s> <record text>`, mean-pooled linear head
+   - listwise softmax over each record's candidates plus a learned "no match" slot
+   - trained on folds 5–9
+3. **LightGBM final ranker** on all of the above, plus the cross-encoder logit and its rank,
+   margin and gap within the record's and the entity's candidate groups.
 
-**Threshold selection method:**
+**Decision rule:**
 
-- Each record is assigned to its argmax entity when p ≥ t.
-- t is swept over 0.05–0.95 and chosen to maximise the exact challenge metric: macro F0.5 per
-  Source 1 entity, singletons included, over the held-out fold-0 entities.
+- Each record keeps only its argmax entity.
+- Two rules are compared on fold 0 with the exact metric (macro F0.5 per entity, singletons
+  included):
+  - a threshold sweep over 0.05–0.95
+  - expected-F0.5 decoding: for each entity, enumerate every true/false labelling of its
+    candidates, weighted by temperature-calibrated probabilities, and keep the top-k that
+    maximises expected F0.5; k = 0 is the singleton choice
+- The better rule is applied to test.
 
 ---
 
 ## 5. Results & Error Analysis
 
-- **F_0.5 Score (macro, held-out fold 0):** [TBD]
-- **Singletons / non-singletons:** [TBD]
-- **Micro precision / recall:** [TBD]
-- **Per country:** [TBD]
-- **Public leaderboard:** [TBD]
-- **Common false positives (wrong merges):** [TBD from error analysis]
-- **Common false negatives (missed matches):** [TBD from error analysis]
+| Version | What changed | Validation macro F0.5 | Public LB |
+|---|---|---|---|
+| dense baseline | bi-encoder top-1 + cosine/margin threshold | — | 0.753 |
+| v0 | LightGBM pruner, threshold | 0.9795 (older, optimistic protocol) | 0.972 |
+| v1 | + cross-encoder + final ranker | 0.9906 (older protocol) | [TBD] |
+| v2 | + honest folds, decoy features, address structure, French-safe normalisation, expected-F decoding | [TBD] | [TBD] |
+
+- **v1 on validation:**
+  - singletons 0.9965, non-singletons 0.9902
+  - micro precision 0.9984, micro recall 0.9744
+  - US 0.990, India 0.992
+- **Common false positives (wrong merges):** sibling businesses on the same street (the name
+  plus a qualifier or legal word, with the house number moved); franchises with identical
+  names and missing addresses.
+- **Common false negatives (missed matches):** records whose trade name was replaced and whose
+  address is partial. Roughly 1.3% (US) / 1.9% (India) of true pairs carry no usable signal.
 
 ---
 
@@ -193,13 +264,16 @@ gradient-boosted trees, cross-encoder).
 
 - `run.sh` — stage runner (`all1`, `all2`, or single stages)
 - `src/textnorm.py` — normalisation rules
-- `src/prepare.py` — loading, transliteration dictionary, parquet tables
+- `src/prepare.py` — loading, transliteration dictionary, address components, parquet tables
 - `src/biencoder.py` — bi-encoder fine-tuning and embedding
 - `src/retrieve.py` — exact blocked GPU kNN
+- `src/refold.py` — decoy fold assignment
 - `src/features.py` — pair features
 - `src/ranker.py` — LightGBM pruner and final ranker
+- `src/features2.py` — decoy features
 - `src/crossencoder.py` — cross-encoder
-- `src/decide.py` — assignment, threshold tuning, output writer
+- `src/decide.py` — assignment, decision-rule tuning, output writer
+- `src/analyze.py`, `src/silver_check.py` — diagnostics only
 
 Reproduce with `bash run.sh all1 && bash run.sh all2`. The README gives the exact environment
 and runtime per stage.
@@ -209,8 +283,11 @@ and runtime per stage.
 - Only the provided data is used: no external APIs, databases, geocoding or look-ups.
 - The only pretrained model is `intfloat/multilingual-e5-small` (MIT, 118M parameters), well
   under the 8B limit.
-- The abbreviation maps in `textnorm.py` encode generic spelling conventions only (Rd/Road,
-  Ltd/Limited, R./Rue), not any business or place data.
+- The normalisation rules in `textnorm.py` encode generic spelling conventions only (Rd/Road,
+  Ltd/Limited, R./Rue, N°, bis/ter, dba), not business or place data.
+- Test inputs are used only in unsupervised ways that need no labels: IDF statistics, locality
+  frequencies among Source 1 records, and the silver diagnostic, which is never used for
+  training or tuning.
 
 ### B. Additional Results
 
