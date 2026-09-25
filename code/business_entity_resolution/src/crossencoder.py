@@ -40,7 +40,8 @@ class CrossEncoder(torch.nn.Module):
         h = self.m(input_ids=ids, attention_mask=mask).last_hidden_state
         m = mask.unsqueeze(-1).to(h.dtype)
         e = (h * m).sum(1) / m.sum(1).clamp(min=1)
-        return self.head(e.float()).squeeze(-1)
+        # match the head's dtype (fp32 in training under autocast, bf16 when scoring)
+        return self.head(e.to(self.head.weight.dtype)).float().squeeze(-1)
 
 
 class GroupDS(Dataset):
