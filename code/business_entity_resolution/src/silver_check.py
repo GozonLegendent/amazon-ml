@@ -24,12 +24,12 @@ _WEAK = {"r", "rue", "ave", "blvd", "che", "all", "imp", "rte", "pl", "qu", "crs
          "cir", "ter", "trl", "n", "s", "e", "w", "main", "ngr", "col", "sec", "marg", "blk", "ph", "gen"}
 
 
-def silver(P, strict=False):
+def silver(P, strict=False, split="test"):
     """strict: the shared street word must be a real street-name word (not a street type or
     function word) and every token of the entity's finest locality must appear in the record."""
     cols = ["idx", "entity_id", "country", "ncore", "anum", "astreet", "atok"]
-    s1 = pl.read_parquet(P.w("test", "s1.parquet"), columns=cols + ["afine1"])
-    q = pl.read_parquet(P.w("test", "q.parquet"), columns=cols)
+    s1 = pl.read_parquet(P.w(split, "s1.parquet"), columns=cols + ["afine1"])
+    q = pl.read_parquet(P.w(split, "q.parquet"), columns=cols)
     key = lambda d: d.with_columns(pl.col("anum").str.split(" ").list.first().alias("fn"),
                                    pl.col("astreet").str.split(" ").alias("st")).filter(
         (pl.col("ncore") != "") & pl.col("fn").is_not_null() & (pl.col("fn") != ""))
