@@ -137,8 +137,16 @@ def write_outputs(P, rule, out_dir, source):
     qid = pl.read_parquet(P.w("test", "q.parquet"), columns=["idx", "entity_id"]).rename(
         {"idx": "q_idx", "entity_id": "qid"})
     top = best_per_query(scored)
-    best = (ef_select(top, rule["a"], rule["miss"]) if rule["mode"] == "ef"
-            else top.filter(pl.col("p") >= rule["t"]).select("s1_idx", "q_idx"))
+    if rule.get("country_t"):
+        # per-country thresholds (countries not listed use rule["t"])
+        ct = pl.read_parquet(P.w("test", "s1.parquet"), columns=["idx", "country"]).rename({"idx": "s1_idx"})
+        tmap = pl.DataFrame({"country": list(rule["country_t"]), "tc": [float(v) for v in rule["country_t"].values()]})
+        top = (top.join(ct, on="s1_idx").join(tmap, on="country", how="left")
+                  .with_columns(pl.col("tc").fill_null(rule["t"])))
+        best = top.filter(pl.col("p") >= pl.col("tc")).select("s1_idx", "q_idx")
+    else:
+        best = (ef_select(top, rule["a"], rule["miss"]) if rule["mode"] == "ef"
+                else top.filter(pl.col("p") >= rule["t"]).select("s1_idx", "q_idx"))
     log.info(f"test decision rule: {rule}")
     os.makedirs(out_dir, exist_ok=True)
     for pairs, col, fname in ((best, "matched_entity_ids", "matching_results.tsv"),
@@ -160,6 +168,7 @@ def main():
     ap.add_argument("--work-dir", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--threshold", type=float, default=None, help="skip tuning and use this")
+    ap.add_argument("--country-t", default=None, help='per-country test thresholds, e.g. "France:0.9,US:0.75" (others use --threshold)')
     ap.add_argument("--scored-file", default=None, help="evaluate this train scores parquet instead (with --eval-only)")
     ap.add_argument("--eval-only", action="store_true", help="only report validation, write nothing")
     ap.add_argument("--scores", choices=["scored", "pruned"], default="scored",
@@ -168,6 +177,9 @@ def main():
     P = Paths(args.data_dir, args.work_dir)
     with timer("tune decision rule on validation fold"):
         rule = {"mode": "threshold", "t": args.threshold} if args.threshold is not None else tune(P, args)
+        if args.country_t:
+            rule = dict(rule, mode="threshold", t=rule.get("t", args.threshold),
+                        country_t={k: float(v) for k, v in (x.split(":") for x in args.country_t.split(","))})
     if args.eval_only:
         return
     with timer("write test outputs"):
