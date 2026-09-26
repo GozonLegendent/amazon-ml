@@ -27,6 +27,10 @@ from .common import Paths, effective_cpus, log, save_json, timer
 RANK_FOLDS = [1, 2, 3, 4]
 # source id: formatting of French S2 records resembles training S3, so the model must not condition on it
 DROP_FEATS = ["q_src"]
+# final ranker: cluster-count features do not transfer to test. On test, sibling decoys come as several
+# records sharing the moved house number, which on training data only true clusters do, so these
+# features made test decoy clusters look genuine (decoy acceptance 0.07% on validation vs 9.1% on test).
+FINAL_DROP = ["cl_same_qnum", "cl_same_snum", "cl_n", "pr_s_n"]
 
 
 def labels_and_folds(P, cands):
@@ -54,7 +58,7 @@ def competition_feats(df, col, prefix):
     return df
 
 
-def load_matrix(P, split, stage):
+def load_matrix(P, split, stage, final_drop=None):
     if stage == "prune":
         cands = pl.read_parquet(P.w("cands", f"{split}.parquet"), columns=["q_idx", "s1_idx"])
         X = pl.read_parquet(P.w("feats", f"{split}.parquet"))
@@ -63,6 +67,7 @@ def load_matrix(P, split, stage):
     feats = pl.read_parquet(P.w("feats", f"{split}.parquet"))
     X = feats[pr["row"].to_numpy()]
     X = X.drop([c for c in DROP_FEATS if c in X.columns])
+    drop_final = FINAL_DROP if final_drop is None else final_drop
     xe = np.load(P.w("xenc", f"{split}.npy"))
     if len(xe) != pr.height:
         raise RuntimeError(f"xenc/{split}.npy has {len(xe)} scores but pruned has {pr.height} pairs: re-run xenc")
@@ -83,6 +88,7 @@ def load_matrix(P, split, stage):
         parts.append(f2)
     parts.append(df.drop("q_idx", "s1_idx"))
     X = pl.concat(parts, how="horizontal")
+    X = X.drop([c for c in drop_final if c in X.columns])
     return pr.select("q_idx", "s1_idx", "row"), X
 
 
@@ -117,7 +123,7 @@ def fit(P, stage, args):
     the same kind of score it will get on validation and test.
     Returns (booster, cands, train_predictions_or_None).
     """
-    cands, X = load_matrix(P, "train", stage)
+    cands, X = load_matrix(P, "train", stage, args.final_drop)
     y, fold = labels_and_folds(P, cands)
     names = X.columns
     Xn = X.to_numpy()
@@ -147,7 +153,7 @@ def fit(P, stage, args):
 
 def predict(P, stage, bst, split, args, cands=None, p=None):
     if p is None:
-        cands, X = load_matrix(P, split, stage)
+        cands, X = load_matrix(P, split, stage, args.final_drop)
         Xn = X.to_numpy()
         del X
         with timer(f"[{stage}] predict {split} ({len(Xn)} rows)"):
@@ -186,7 +192,11 @@ def main():
     ap.add_argument("--max-train-rows", type=int, default=12_000_000)
     ap.add_argument("--threads", type=int, default=effective_cpus())
     ap.add_argument("--splits", default="train,test")
+    ap.add_argument("--final-drop", default=None,
+                    help="comma list of features to drop in the final stage (default: FINAL_DROP; '' = drop none)")
     args = ap.parse_args()
+    if args.final_drop is not None:
+        args.final_drop = [c for c in args.final_drop.split(",") if c]
     P = Paths(args.data_dir, args.work_dir)
     bst, cands_tr, p_tr = fit(P, args.stage, args)
     for split in args.splits.split(","):
