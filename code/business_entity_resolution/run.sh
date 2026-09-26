@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # Stage runner. Usage:  bash run.sh <stage> [extra args passed to the stage]
-#   prepare | bienc | retrieve | features | prune | xenc | final | decide | validate
+#   prepare | bienc | retrieve | refold | features | prune | feats2 | analyze | xenc | final | decide | validate
 #   all1  = prepare -> bienc -> retrieve -> refold
 #   all2  = features -> prune -> feats2 -> xenc -> final -> decide -> validate
 #   smoke = both chains on a 1% subset (catches bugs in a few minutes)
 # Paths default to <ROOT>/student_resource/dataset and <ROOT>/submission/...
 # Override with env vars:  DATA=/path/to/dataset WORK=/path/to/work bash run.sh prepare
-# THRESHOLD=0.75 fixes the decision threshold (the submitted runs use 0.75, see README "Decision threshold")
+# THRESHOLD defaults to 0.75, the value used for the submitted files (README "Decision threshold");
+# THRESHOLD= (empty) makes decide tune the rule on validation instead (t = 0.36 for the final model).
 set -eo pipefail
 cd "$(dirname "$0")"
 ROOT=${ROOT:-$(cd ../../.. && pwd)}
 DATA=${DATA:-$ROOT/student_resource/dataset}
 WORK=${WORK:-$ROOT/work}
-OUT=${OUT:-$ROOT/submission/output}
+OUT=${OUT:-$(cd ../.. && pwd)/output}   # the package's own output/ folder
 VALIDATOR=${VALIDATOR:-$ROOT/student_resource/utils/validate_submission.py}
-LOG=$ROOT/logs
+LOG=${LOG:-$ROOT/logs}
+THRESHOLD=${THRESHOLD-0.75}
 mkdir -p "$LOG"
 stage=${1:-}; shift || true
 export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false

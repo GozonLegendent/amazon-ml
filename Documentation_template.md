@@ -1,8 +1,8 @@
-# ML Challenge 2026: Business Entity Resolution Solution Template
+# ML Challenge 2026: Business Entity Resolution Solution
 
 **Team Name:** [Your Team Name]  
 **Team Members:** [List all team members]  
-**Submission Date:** [Date]
+**Submission Date:** 27 September 2026
 
 ---
 
@@ -16,13 +16,14 @@ The pipeline has four stages:
 
 1. **Retrieval.** A fine-tuned multilingual bi-encoder (e5-small, MIT) runs exact GPU
    nearest-neighbour search inside each country label, in both directions.
-2. **Pruning.** A LightGBM model prunes the candidates using 50 string, number, address-structure
+2. **Pruning.** A LightGBM model prunes the candidates using 49 string, number, address-structure
    and embedding features.
-3. **Scoring.** A fine-tuned listwise cross-encoder and 29 "decoy" features score each surviving
+3. **Scoring.** A fine-tuned listwise cross-encoder and 26 "decoy" features score each surviving
    pair.
-4. **Decision.** A final LightGBM model combines everything. A decision rule tuned directly for
-   the challenge's macro F0.5 (either a threshold or expected-F0.5 top-k per entity) picks the
-   matches.
+4. **Decision.** A final LightGBM model combines everything. Each record keeps only its most
+   probable entity, and a link is kept when its probability is at least 0.75. That threshold
+   was set from a label-free analysis of the test score distribution (§5); the rule tuned on
+   validation would have picked 0.36.
 
 What sets this apart from a plain blocking-plus-classifier setup:
 
@@ -119,7 +120,8 @@ retrieval, gradient-boosted trees and a cross-encoder).
    - moved house numbers with the signed distance
    - added legal words
    - extra-word log-odds learned from labels
-   - cluster consistency among an entity's candidate records
+   - (tried and removed from the submitted model: cluster consistency among an entity's
+     candidate records; see §5)
 4. **Country-agnostic address structure** (street component, finest locality) and a
    native-script→Latin dictionary learned only from training pairs.
 
@@ -163,7 +165,7 @@ retrieval, gradient-boosted trees and a cross-encoder).
 
 ## 4. Matching Model
 
-**Pair features, blocking stage (50):**
+**Pair features, blocking stage (50 computed, 49 used: the source indicator `q_src` is dropped):**
 
 - **Name:**
   - rapidfuzz ratio, token-sort, token-set and partial ratio on canonical tokens
@@ -190,7 +192,7 @@ retrieval, gradient-boosted trees and a cross-encoder).
   - token counts
   - how common the entity's core name is in its country
 
-**Decoy features on pruned pairs (29):**
+**Decoy features on pruned pairs (29 computed; 26 used by the submitted final ranker):**
 
 - **House numbers:**
   - first-number equality, containment, gap and signed gap
@@ -203,7 +205,8 @@ retrieval, gradient-boosted trees and a cross-encoder).
   legal-form conflicts.
 - **Ambiguity:** number of Source 1 entities sharing the exact full name.
 - **Cluster:** how many of the entity's other candidate records share this record's house
-  number versus the entity's own.
+  number versus the entity's own. Computed but **not used** by the submitted final ranker
+  (`FINAL_DROP` in `src/ranker.py`, see §5).
 
 **Model type:**
 
@@ -213,8 +216,15 @@ retrieval, gradient-boosted trees and a cross-encoder).
    - input `<S1 text> </s> <record text>`, mean-pooled linear head
    - listwise softmax over each record's candidates plus a learned "no match" slot
    - trained on folds 5–9
-3. **LightGBM final ranker** on all of the above, plus the cross-encoder logit and its rank,
-   margin and gap within the record's and the entity's candidate groups.
+3. **LightGBM final ranker** (87 features):
+   - the 49 blocking-stage features
+   - 26 decoy features
+   - the pruner probability and the cross-encoder logit, with the rank, margin and gap of each
+     within the record's and the entity's candidate groups
+   - the entity's number of positive cross-encoder logits, and the record's candidate count
+
+   Excluded (`FINAL_DROP`): the three cluster counts and the entity's candidate count
+   (`cl_same_qnum, cl_same_snum, cl_n, pr_s_n`).
 
 **Decision rule:**
 
@@ -226,6 +236,13 @@ retrieval, gradient-boosted trees and a cross-encoder).
     candidates, weighted by temperature-calibrated probabilities, and keep the top-k that
     maximises expected F0.5; k = 0 is the singleton choice
 - The better rule is applied to test.
+
+**Threshold selection method:**
+- `decide.py` sweeps a threshold over 0.05–0.95 and tries expected-F0.5 top-k on fold 0. The
+  validation-tuned threshold is t = 0.36 (macro F0.5 0.99222).
+- The submitted files use a fixed **t = 0.75** (`THRESHOLD=0.75`, `run.sh`'s default). It was
+  chosen from a label-free comparison of test and validation score distributions (§5) and
+  costs 0.00075 on validation (0.99147).
 
 ---
 
@@ -276,7 +293,18 @@ retrieval, gradient-boosted trees and a cross-encoder).
 
 ## 6. Conclusion
 
-[TBD]
+We resolve entities as an assignment problem, in five steps:
+1. dense bidirectional retrieval inside each country label
+2. a LightGBM pruner
+3. a listwise cross-encoder
+4. a final LightGBM ranker
+5. a per-record argmax with a fixed probability threshold
+
+The largest gains came from an honest validation protocol that puts each decoy in the fold
+of the entity it competes with, and from features aimed at sibling decoys. The main lesson
+was that validation did not show two failure modes: the cluster-count features and the
+validation-optimal threshold both carried over badly to the test set. Label-free test
+diagnostics found both (public LB 0.969 → 0.986).
 
 ---
 
@@ -297,22 +325,48 @@ retrieval, gradient-boosted trees and a cross-encoder).
 - `src/features2.py` — decoy features
 - `src/crossencoder.py` — cross-encoder
 - `src/decide.py` — assignment, decision-rule tuning, output writer
-- `src/analyze.py`, `src/silver_check.py` — diagnostics only
+- `src/common.py` — paths, IO, logging, fold hash
+- Diagnostics only (not in the submission path):
+  - `src/analyze.py`
+  - `src/silver_check.py`
+  - `src/bucket_diag.py`
+  - `src/decoy_diag.py`
+  - `src/test_diag.py`
+  - `src/veto.py` (unused post-filter)
+  - `src/quick_dense.py` (dense baseline, LB 0.753)
+  - `src/make_dev_subset.py` (smoke data)
+  - `src/gpucheck.py`
+  - `experiments.sh`
 
-Reproduce with `bash run.sh all1 && bash run.sh all2`. The README gives the exact environment
-and runtime per stage.
+Reproduce with `bash run.sh all1 && bash run.sh all2` (`run.sh` defaults to the submitted
+threshold, `THRESHOLD=0.75`). The README gives the environment, data paths and the runtime of
+each chain.
 
 **Compliance:**
 
 - Only the provided data is used: no external APIs, databases, geocoding or look-ups.
-- The only pretrained model is `intfloat/multilingual-e5-small` (MIT, 118M parameters), well
+- The only pretrained model is `intfloat/multilingual-e5-small` (MIT, 117.7M parameters), well
   under the 8B limit.
 - The normalisation rules in `textnorm.py` encode generic spelling conventions only (Rd/Road,
   Ltd/Limited, R./Rue, N°, bis/ter, dba), not business or place data.
-- Test inputs are used only in unsupervised ways that need no labels: IDF statistics, locality
-  frequencies among Source 1 records, and the silver diagnostic, which is never used for
-  training or tuning.
+- Test inputs (never labels) are used in these ways:
+  - **Unsupervised statistics inside the pipeline:**
+    - IDF weights fitted on each split's own records (the test IDF on test Source 1-3 records)
+    - locality frequencies, and core-name / full-name frequencies, among test Source 1 records
+    - rank, margin and count features within each test record's and entity's candidate set
+  - **Label-free model selection** (no weights fitted on test):
+    1. The threshold t = 0.75 was chosen from the distribution of the model's test
+       probabilities. Test links per entity were compared with validation true links per
+       entity, by country and probability band (`src/bucket_diag.py`), and checked against
+       rule-matched "silver" test pairs (`src/silver_check.py`).
+    2. The four count features in `FINAL_DROP` were removed after comparing their test and
+       validation distributions on decoy-signature links (`src/decoy_diag.py`,
+       `src/test_diag.py`).
+    3. The French address handling (street component, finest locality, no source indicator)
+       came from inspecting test inputs (§2.1).
+  - Public-leaderboard scores were used to compare submitted versions (§5).
 
 ### B. Additional Results
 
-[TBD]
+Test probability bands: for each country and band, the implied test precision (US/India)
+and the silver-pair precision are produced by `src/bucket_diag.py` (§5, point 3).

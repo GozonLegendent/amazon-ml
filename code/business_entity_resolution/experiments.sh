@@ -5,7 +5,7 @@
 #   bash experiments.sh          # v3 report + variants v4a, v4b   (~40 min)
 set -eo pipefail
 cd "$(dirname "$0")"
-ROOT=$(cd ../../.. && pwd); D=$ROOT/student_resource/dataset; W=$ROOT/work; L=$ROOT/logs/exp; mkdir -p "$L"
+ROOT=$(cd ../../.. && pwd); D=${DATA:-$ROOT/student_resource/dataset}; W=${WORK:-$ROOT/work}; L=$ROOT/logs/exp; mkdir -p "$L"
 export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false
 T=${T:-0.75}
 BASE="cl_same_qnum,cl_same_snum,cl_n,pr_s_n"                                         # removed in v3
@@ -38,9 +38,11 @@ variant() {  # $1 tag, $2 comma list of final-stage features to drop
 }
 
 for s in train test; do [ -f "$W/scored_v3_$s.parquet" ] || cp "$W/scored/$s.parquet" "$W/scored_v3_$s.parquet"; done
+for f in lgb_final.txt lgb_final_importance.json; do [ -f "$W/models/v3_$f" ] || cp "$W/models/$f" "$W/models/v3_$f"; done
 report v3_t075 2>&1 | tee "$L/v3.log"
 variant v4a "$BASE,$S1SIDE" 2>&1 | tee "$L/v4a.log"
 variant v4b "$BASE,$S1SIDE,$NAMEFREQ" 2>&1 | tee "$L/v4b.log"
 # leave the box in the v3 state (the submitted model)
 for s in train test; do cp "$W/scored_v3_$s.parquet" "$W/scored/$s.parquet"; done
-echo "done; scored/ restored to v3"
+for f in lgb_final.txt lgb_final_importance.json; do cp "$W/models/v3_$f" "$W/models/$f"; done
+echo "done; scored/ and the final model restored to v3"

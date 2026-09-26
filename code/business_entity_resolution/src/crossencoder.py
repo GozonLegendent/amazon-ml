@@ -4,7 +4,7 @@ Backbone: the fine-tuned bi-encoder (intfloat/multilingual-e5-small, MIT, 118M
 params) with a linear head on the mean-pooled pair representation. Input: "<s1 text> </s> <query text>".
 
 Training data: queries whose true Source 1 entity is in the base-model folds (5-9),
-plus unmatched queries hashed into those folds. Every such query contributes its
+plus unmatched queries assigned (by refold) to those folds. Every such query contributes its
 surviving candidates after pruning, so negatives are exactly the hard confusions
 the earlier stages produce (same-name franchises, same-street neighbours).
 Loss: listwise softmax over each query's candidates plus a learned "no match"

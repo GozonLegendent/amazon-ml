@@ -5,7 +5,9 @@ same canonical core name, same first house number, at least one shared street
 word, and the (country, core name, number) key belongs to exactly one Source 1
 entity. On the US training labels this rule is ~99.8% precise. It only covers
 easy matches, so it measures misses of easy matches and conflicting assignments,
-not the full metric. The silver pairs are never used for training or tuning.
+not the full metric. The silver pairs are never used for training; together with
+bucket_diag.py they served as label-free evidence when the submitted threshold (0.75)
+was chosen.
 
 Usage: python -m src.silver_check --data-dir D --work-dir W --pred A.tsv [--pred B.tsv ...]
 """
