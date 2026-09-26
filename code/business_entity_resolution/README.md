@@ -58,6 +58,27 @@ validation misses by stage and false merges; `src/silver_check.py` measures, per
 country, how many easy high-confidence test pairs (same core name, same house
 number, shared street word, unique on the S1 side) a prediction file recovers.
 
+## Decision threshold
+
+`decide` tunes the threshold on validation (0.36 for the final model). The submitted
+files use **`THRESHOLD=0.75`**:
+
+```bash
+THRESHOLD=0.75 bash run.sh decide
+```
+
+The reason is a measured shift between validation and test. Test has about 23% more
+Source 2/3 records per entity (extra decoys), and about 2× more kept links fall in the
+0.36–0.75 probability range than on validation. US and India come from the training
+generator, so their true links per entity per probability band should match validation.
+Dividing validation true links per entity by test links per entity in each band gives
+an implied test precision of about 40–54% below 0.75, and 73–94% above it. Under macro
+F0.5 a link is worth keeping only if it is right at least about 77% of the time (a
+false link costs an entity about 0.19; an extra true link gains about 0.056). So 0.75
+is where the implied test precision crosses break-even. On validation this costs
+0.00075 (0.99222 → 0.99147). No test labels are used; only the unlabeled distribution
+of the model's test probabilities.
+
 ## Validation protocol
 
 Source 1 entities are split into 10 folds by CRC32 of their id. Each matched

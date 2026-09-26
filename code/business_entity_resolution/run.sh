@@ -6,6 +6,7 @@
 #   smoke = both chains on a 1% subset (catches bugs in a few minutes)
 # Paths default to <ROOT>/student_resource/dataset and <ROOT>/submission/...
 # Override with env vars:  DATA=/path/to/dataset WORK=/path/to/work bash run.sh prepare
+# THRESHOLD=0.75 fixes the decision threshold (the submitted runs use 0.75, see README "Decision threshold")
 set -eo pipefail
 cd "$(dirname "$0")"
 ROOT=${ROOT:-$(cd ../../.. && pwd)}
@@ -34,7 +35,7 @@ chain2() {  # $1=data $2=work $3=out $4=log prefix, rest = extra xenc args
   run ${p}feats2   src.features2    --data-dir "$d" --work-dir "$w"
   run ${p}xenc     src.crossencoder --data-dir "$d" --work-dir "$w" "$@"
   run ${p}final    src.ranker       --data-dir "$d" --work-dir "$w" --stage final
-  run ${p}decide   src.decide       --data-dir "$d" --work-dir "$w" --out-dir "$o"
+  run ${p}decide   src.decide       --data-dir "$d" --work-dir "$w" --out-dir "$o" ${THRESHOLD:+--threshold $THRESHOLD}
   python3 "$VALIDATOR" --matching "$o/matching_results.tsv" --candidate "$o/candidate_pairs.tsv" \
       --test-dir "$d/test" 2>&1 | tee "$LOG/${p}validate.log"
 }
@@ -55,7 +56,7 @@ case "$stage" in
   analyze)  run analyze  src.analyze      --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   xenc)     run xenc     src.crossencoder --data-dir "$DATA" --work-dir "$WORK" "$@" ;;
   final)    run final    src.ranker       --data-dir "$DATA" --work-dir "$WORK" --stage final "$@" ;;
-  decide)   run decide   src.decide       --data-dir "$DATA" --work-dir "$WORK" --out-dir "$OUT" "$@" ;;
+  decide)   run decide   src.decide       --data-dir "$DATA" --work-dir "$WORK" --out-dir "$OUT" ${THRESHOLD:+--threshold $THRESHOLD} "$@" ;;
   validate)
     python3 "$VALIDATOR" --matching "$OUT/matching_results.tsv" --candidate "$OUT/candidate_pairs.tsv" \
         --test-dir "$DATA/test" 2>&1 | tee "$LOG/validate.log" ;;
