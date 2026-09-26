@@ -14,7 +14,8 @@ OR=${OUTROOT:-$ROOT}
 quiet() { grep --line-buffered -v -E "Deprecation|explode|empty_as_null|warn"; }
 
 echo "waiting for overnight.sh (v5) to finish ($(date +%H:%M))"
-while ps aux | grep -q "[o]vernight[.]sh"; do sleep 60; done
+# grep without -q reads all of ps output: with -q, ps can die of SIGPIPE and pipefail ends the wait early
+while ps aux | grep "[o]vernight[.]sh" >/dev/null; do sleep 60; done
 echo "v5 finished ($(date +%H:%M)): $(tail -1 "$ROOT/logs/v5.out" 2>/dev/null)"
 EXTRA=3; [ -f "$W/xenc2/test.npy" ] && [ -f "$W/xenc2/train.npy" ] && EXTRA=2,3
 free_gb=$(df -Pk "$W" | awk 'NR==2 {print int($4 / 1048576)}')
