@@ -235,13 +235,37 @@ retrieval, gradient-boosted trees and a cross-encoder).
 |---|---|---|---|
 | dense baseline | bi-encoder top-1 + cosine/margin threshold | — | 0.753 |
 | v0 | LightGBM pruner, threshold | 0.9795 (older, optimistic protocol) | 0.972 |
-| v1 | + cross-encoder + final ranker | 0.9906 (older protocol) | [TBD] |
-| v2 | + honest folds, decoy features, address structure, French-safe normalisation, expected-F decoding | [TBD] | [TBD] |
+| v1 | + cross-encoder + final ranker | 0.9906 (older protocol) | not submitted |
+| v2 | + honest folds, decoy features, address structure, French-safe normalisation | 0.99264 (strict) | 0.969 |
+| **v3** | v2 without the cluster-count features in the final ranker, threshold 0.75 | 0.99147 (strict) | **0.986** |
 
-- **v1 on validation:**
-  - singletons 0.9965, non-singletons 0.9902
-  - micro precision 0.9984, micro recall 0.9744
-  - US 0.990, India 0.992
+- **v3 on validation (strict protocol, t = 0.75):** macro F0.5 0.99147. At the
+  validation-tuned t = 0.36 it scores 0.99222: singletons 0.9935, non-singletons 0.9921,
+  micro precision 0.9976, micro recall 0.9810, US 0.9916, India 0.9932.
+
+**Why v2 fell on test and v3 recovered (label-free diagnosis).**
+
+1. **The v2 → v0 diff isolated the failure.** v2 added 358k test links. About 51% of the
+   added US links carry the sibling-decoy signature (a house number moved up by a small
+   offset, plus an added legal or extra word). The signature is on 0.15% of true training
+   pairs.
+2. **The cause was the cluster-count features.** v2 kept 9.1% of test decoy-signature
+   links, against 0.07% on validation. The cross-encoder and pruner scored the test decoys
+   exactly like the validation ones (xe ≈ −5, p_a ≈ 0.08). The cluster count was the one
+   input that changed: on test, sibling decoys come as several records sharing the moved
+   house number (mean 0.90 vs 0.19 on validation). On training data only true clusters look
+   like that. Removing the four cluster-count features dropped test decoy acceptance to
+   0.98%.
+3. **Test has about 2× more borderline links than validation.**
+   - US and India come from the training generator, so validation gives their true links
+     per entity per probability band.
+   - Dividing that by test links per entity gives an implied test precision of about
+     40–54% below p = 0.75, and 73–94% above it.
+   - Under macro F0.5, a link pays off only above about 77% precision: a false link costs
+     an entity about 0.19, and an extra true link gains about 0.056.
+   - So the submitted threshold is 0.75, not 0.36. It costs 0.00075 on validation.
+   - For France, the silver queries confirmed the choice: moving from 0.36 to 0.75 removed
+     445 wrong links and 291 right ones.
 - **Common false positives (wrong merges):** sibling businesses on the same street (the name
   plus a qualifier or legal word, with the house number moved); franchises with identical
   names and missing addresses.
