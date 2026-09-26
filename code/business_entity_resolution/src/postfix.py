@@ -24,7 +24,8 @@ import polars as pl
 from .common import Paths, log
 from .features2 import _extra
 
-AMBIGUOUS = {"ctr", "france", "ste", "gestion", "conseil"}
+# words that true French pairs also add or drop as noise (family suffixes, generic words): never swap evidence
+AMBIGUOUS = {"ctr", "france", "ste", "gestion", "conseil", "fils", "freres", "associes", "associe"}
 CAP = {2: 5, 3: 6}
 
 
