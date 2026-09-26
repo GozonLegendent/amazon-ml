@@ -18,9 +18,18 @@ import polars as pl
 from .common import Paths, log
 
 
-def silver(P):
-    s1 = pl.read_parquet(P.w("test", "s1.parquet"), columns=["idx", "entity_id", "country", "ncore", "anum", "astreet"])
-    q = pl.read_parquet(P.w("test", "q.parquet"), columns=["idx", "entity_id", "country", "ncore", "anum", "astreet"])
+# street-type / function words that must not count as a shared street word in strict mode
+_WEAK = {"r", "rue", "ave", "blvd", "che", "all", "imp", "rte", "pl", "qu", "crs", "psg", "sq", "res", "cite", "fbg",
+         "de", "du", "des", "la", "le", "les", "d", "l", "st", "ste", "rd", "dr", "ln", "ct", "way", "pkwy", "hwy",
+         "cir", "ter", "trl", "n", "s", "e", "w", "main", "ngr", "col", "sec", "marg", "blk", "ph", "gen"}
+
+
+def silver(P, strict=False):
+    """strict: the shared street word must be a real street-name word (not a street type or
+    function word) and every token of the entity's finest locality must appear in the record."""
+    cols = ["idx", "entity_id", "country", "ncore", "anum", "astreet", "atok"]
+    s1 = pl.read_parquet(P.w("test", "s1.parquet"), columns=cols + ["afine1"])
+    q = pl.read_parquet(P.w("test", "q.parquet"), columns=cols)
     key = lambda d: d.with_columns(pl.col("anum").str.split(" ").list.first().alias("fn"),
                                    pl.col("astreet").str.split(" ").alias("st")).filter(
         (pl.col("ncore") != "") & pl.col("fn").is_not_null() & (pl.col("fn") != ""))
@@ -28,7 +37,14 @@ def silver(P):
     uniq = a.group_by("country", "ncore", "fn").len().filter(pl.col("len") == 1).drop("len")
     a = a.join(uniq, on=["country", "ncore", "fn"])
     j = b.join(a, on=["country", "ncore", "fn"], suffix="_s1")
-    j = j.filter(pl.col("st").list.set_intersection(pl.col("st_s1")).list.len() > 0)
+    shared = pl.col("st").list.set_intersection(pl.col("st_s1"))
+    if strict:
+        shared = shared.list.eval(pl.element().filter(~pl.element().is_in(list(_WEAK)) & (pl.element().str.len_chars() >= 3)))
+        city_ok = (pl.col("afine1") == "") | pl.col("afine1").str.split(" ").list.set_difference(
+            pl.col("atok").str.split(" ")).list.len().eq(0)
+        j = j.filter((shared.list.len() > 0) & city_ok)
+    else:
+        j = j.filter(shared.list.len() > 0)
     return j.select(pl.col("entity_id").alias("qid"), pl.col("entity_id_s1").alias("sid"), "country")
 
 

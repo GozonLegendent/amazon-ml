@@ -38,6 +38,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", required=True)
     ap.add_argument("--work-dir", required=True)
+    ap.add_argument("--strict", action="store_true", help="strict silver (real street word + city present)")
     args = ap.parse_args()
     P = Paths(args.data_dir, args.work_dir)
     pl.Config.set_tbl_rows(-1); pl.Config.set_tbl_cols(-1); pl.Config.set_tbl_width_chars(250)
@@ -59,7 +60,8 @@ def main():
     qt = pl.read_parquet(P.w("test", "q.parquet"), columns=["idx", "entity_id"])
     te = (argmax(P, "test").filter(pl.col("p") >= EDGES[0]).join(s1t.rename({"idx": "s1_idx"}), on="s1_idx")
             .join(qt.rename({"idx": "q_idx", "entity_id": "qid"}), on="q_idx").with_columns(band()))
-    sv = silver(P).select("qid", "sid")
+    sv = silver(P, strict=args.strict).select("qid", "sid")
+    log.info(f"silver mode: {'strict' if args.strict else 'loose'} | silver pairs {sv.height}")
     te = te.join(sv, on="qid", how="left").with_columns((pl.col("entity_id") == pl.col("sid")).alias("silver_ok"))
     nt = s1t.group_by("country").len().rename({"len": "nS1_test"})
     tb = (te.group_by("country", "band").agg(pl.len().alias("test_links"), pl.col("sid").is_not_null().sum().alias("silver_links"),
