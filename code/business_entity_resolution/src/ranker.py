@@ -58,7 +58,7 @@ def competition_feats(df, col, prefix):
     return df
 
 
-def load_matrix(P, split, stage, final_drop=None):
+def load_matrix(P, split, stage, final_drop=None, extra_xenc=()):
     if stage == "prune":
         cands = pl.read_parquet(P.w("cands", f"{split}.parquet"), columns=["q_idx", "s1_idx"])
         X = pl.read_parquet(P.w("feats", f"{split}.parquet"))
@@ -73,6 +73,11 @@ def load_matrix(P, split, stage, final_drop=None):
         raise RuntimeError(f"xenc/{split}.npy has {len(xe)} scores but pruned has {pr.height} pairs: re-run xenc")
     df = pr.select("q_idx", "s1_idx", "p_a").with_columns(pl.Series("xe", xe, pl.Float32))
     df = competition_feats(df, "xe", "xe")
+    for tag in extra_xenc:  # further, independently trained cross-encoders (crossencoder.py --tag)
+        xt = np.load(P.w(f"xenc{tag}", f"{split}.npy"))
+        if len(xt) != pr.height:
+            raise RuntimeError(f"xenc{tag}/{split}.npy has {len(xt)} scores but pruned has {pr.height} pairs: re-run xenc --tag {tag}")
+        df = competition_feats(df.with_columns(pl.Series(f"xe{tag}", xt, pl.Float32)), f"xe{tag}", f"xe{tag}")
     df = competition_feats(df, "p_a", "pa")
     df = df.with_columns(
         (pl.col("xe") > 0).sum().over("s1_idx").cast(pl.Float32).alias("xe_s_npos"),
@@ -123,7 +128,7 @@ def fit(P, stage, args):
     the same kind of score it will get on validation and test.
     Returns (booster, cands, train_predictions_or_None).
     """
-    cands, X = load_matrix(P, "train", stage, args.final_drop)
+    cands, X = load_matrix(P, "train", stage, args.final_drop, args.extra_xenc)
     y, fold = labels_and_folds(P, cands)
     names = X.columns
     Xn = X.to_numpy()
@@ -153,7 +158,7 @@ def fit(P, stage, args):
 
 def predict(P, stage, bst, split, args, cands=None, p=None):
     if p is None:
-        cands, X = load_matrix(P, split, stage, args.final_drop)
+        cands, X = load_matrix(P, split, stage, args.final_drop, args.extra_xenc)
         Xn = X.to_numpy()
         del X
         with timer(f"[{stage}] predict {split} ({len(Xn)} rows)"):
@@ -194,7 +199,9 @@ def main():
     ap.add_argument("--splits", default="train,test")
     ap.add_argument("--final-drop", default=None,
                     help="comma list of features to drop in the final stage (default: FINAL_DROP; '' = drop none)")
+    ap.add_argument("--extra-xenc", default="", help="[final] comma list of extra cross-encoder tags to add as features")
     args = ap.parse_args()
+    args.extra_xenc = [t for t in args.extra_xenc.split(",") if t]
     if args.final_drop is not None:
         args.final_drop = [c for c in args.final_drop.split(",") if c]
     P = Paths(args.data_dir, args.work_dir)

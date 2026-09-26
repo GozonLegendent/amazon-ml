@@ -11,6 +11,10 @@ Loss: listwise softmax over each query's candidates plus a learned "no match"
 slot, so the model learns both *which* S1 wins and *whether any* S1 matches.
 It is then applied to every pruned candidate pair of both splits; its logit
 becomes a feature for the final ranker.
+--tag T trains a second, independent cross-encoder (e.g. --tag 2 --model intfloat/multilingual-e5-base)
+into models/xenc{T} and xenc{T}/; the final ranker adds it with --extra-xenc T.
+--used-only scores, on the training split, only the pairs the final ranker reads (queries of folds 0-4
+and every pair of an entity that has such a query); the other rows are NaN.
 """
 import argparse
 import math
@@ -144,7 +148,7 @@ def train(P, args):
                 mem = torch.cuda.max_memory_allocated() / 2**30 if dev == "cuda" else 0.0
                 log.info(f"ep {ep} step {step}/{total} loss {loss.item():.4f} "
                          f"none_logit {none_logit.item():.2f} peak mem {mem:.1f} GiB")
-    out = P.w("models", "xenc", "config.json")
+    out = P.w("models", f"xenc{args.tag}", "config.json")
     model.m.save_pretrained(os.path.dirname(out))
     tok.save_pretrained(os.path.dirname(out))
     torch.save({"head": model.head.state_dict(), "none_logit": none_logit.item()},
@@ -169,7 +173,7 @@ class PairDS(Dataset):
 @torch.no_grad()
 def score(P, args):
     dev = device()
-    path = os.path.dirname(P.w("models", "xenc", "config.json"))
+    path = os.path.dirname(P.w("models", f"xenc{args.tag}", "config.json"))
     tok = AutoTokenizer.from_pretrained(path)
     model = CrossEncoder(path)
     model.head.load_state_dict(torch.load(os.path.join(path, "head.pt"), map_location="cpu")["head"])
@@ -177,7 +181,7 @@ def score(P, args):
     if dev == "cuda":
         model.m = model.m.to(torch.bfloat16)  # encoder in bf16, head stays fp32
     for split in args.splits.split(","):
-        out_p = P.w("xenc", f"{split}.npy")
+        out_p = P.w(f"xenc{args.tag}", f"{split}.npy")
         c = pl.read_parquet(P.w("pruned", f"{split}.parquet"), columns=["q_idx", "s1_idx"])
         if (args.skip_train and not args.overwrite and os.path.exists(out_p)
                 and np.load(out_p, mmap_mode="r").shape[0] == c.height):
@@ -188,16 +192,24 @@ def score(P, args):
         q_txt = pl.read_parquet(P.w(split, "q.parquet"), columns=["mtext"])["mtext"].to_list()
         slen = np.fromiter((len(t) for t in s_txt), np.int32, len(s_txt))
         qlen = np.fromiter((len(t) for t in q_txt), np.int32, len(q_txt))
-        order = np.argsort(slen[ia] + qlen[ib], kind="stable")
-        out = np.zeros(len(ia), np.float32)
+        rows = np.arange(len(ia))
+        if split == "train" and args.used_only:
+            fq = pl.read_parquet(P.w("train", "q.parquet"), columns=["idx", "fold"]).rename({"idx": "q_idx"})
+            cf = c.join(fq, on="q_idx", how="left", maintain_order="left")
+            uq = ~cf["fold"].is_in(BASE_FOLDS).fill_null(False)
+            uq = uq.to_numpy()
+            rows = np.flatnonzero(uq | np.isin(ia, np.unique(ia[uq])))
+            log.info(f"{split}: scoring {len(rows)} of {len(ia)} pairs (the rest are never read by the final ranker)")
+        order = rows[np.argsort(slen[ia[rows]] + qlen[ib[rows]], kind="stable")]
+        out = np.full(len(ia), np.nan if args.used_only else 0.0, np.float32)
         dl = DataLoader(PairDS(ia, ib, s_txt, q_txt, order, tok, args.enc_bs, args.max_len),
                         batch_size=None, num_workers=args.num_workers,
                         prefetch_factor=4 if args.num_workers else None)
-        with timer(f"cross-encoder score {split} ({len(ia)} pairs)"):
+        with timer(f"cross-encoder score {split} ({len(order)} pairs)"):
             for n, (rows, e) in enumerate(dl):
                 out[rows.numpy()] = model(e["input_ids"].to(dev), e["attention_mask"].to(dev)).float().cpu().numpy()
                 if n % 2000 == 0:
-                    log.info(f"  {split}: {min((n + 1) * args.enc_bs, len(ia))}/{len(ia)} pairs")
+                    log.info(f"  {split}: {min((n + 1) * args.enc_bs, len(order))}/{len(order)} pairs")
         np.save(out_p, out)
 
 
@@ -218,8 +230,12 @@ def main():
     ap.add_argument("--splits", default="train,test")
     ap.add_argument("--skip-train", action="store_true")
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--tag", default="", help="suffix of the model / score folders (second cross-encoder)")
+    ap.add_argument("--used-only", action="store_true", help="train split: score only the pairs the final ranker reads")
     args = ap.parse_args()
     P = Paths(args.data_dir, args.work_dir)
+    if args.model is None and args.tag:
+        raise SystemExit("--tag needs an explicit --model")
     if args.model is None:
         bienc = os.path.dirname(P.w("models", "bienc", "config.json"))
         args.model = bienc if os.path.exists(os.path.join(bienc, "config.json")) else "intfloat/multilingual-e5-small"
